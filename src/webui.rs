@@ -298,12 +298,12 @@ pub fn page(state: PageState) -> String {
             .replace("{{toml}}", &html_escape(&toml_text))
             .replace("{{message}}", &message_block(message)),
         PageState::Downloads {
-            rows,
+            groups,
             tracker_note,
             history,
             message,
         } => DOWNLOADS_PAGE
-            .replace("{{rows}}", &render_rows(&rows))
+            .replace("{{groups}}", &render_groups(&groups))
             .replace("{{history}}", &render_history(&history))
             .replace("{{tracker_note}}", &html_escape(&tracker_note))
             .replace("{{message}}", &message_block(message)),
@@ -318,9 +318,62 @@ pub fn page(state: PageState) -> String {
 /// text, so nothing could be compared between rows. Each figure now has its own column
 /// so the eye can go down a column and see which download is the large one, which has
 /// given anything back, and which is about to be removed.
+/// One torrent, with the files served out of it.
+///
+/// A torrent is the unit the tracker deals in and the unit the seeding obligation belongs to, so
+/// it is the unit the page is organised by. A pack with eight episodes was eight rows that had to
+/// be read one by one to work out they were the same download; now it is one line that opens.
+pub struct TorrentGroup {
+    /// The torrent's info hash, which is what the grouping is by.
+    pub hash: String,
+    /// The release, as the folder on disk names it.
+    pub title: String,
+    /// The one-line summary: how many files, how many watched, how much room.
+    pub summary: String,
+    /// Whether the tracker still wants seeding on this torrent, ready to display.
+    pub owed_label: String,
+    pub owed_class: &'static str,
+    pub owed_detail: String,
+    /// Open by default when something in it needs attention.
+    pub open: bool,
+    pub rows: Vec<DownloadRow>,
+}
+
+fn render_groups(groups: &[TorrentGroup]) -> String {
+    if groups.is_empty() {
+        return "<p class=\"note\">Még nincs letöltés.</p>".into();
+    }
+    let mut out = String::new();
+    for group in groups {
+        out.push_str(&format!(
+            "<details class=\"grp\"{open}>\n\
+             <summary><span class=\"gt\">{title}</span>\
+             <span class=\"gs\">{summary}</span>\
+             <span class=\"go {owed_class}\">{owed_label}{owed_detail}</span></summary>\n\
+             <div class=\"scroll\"><table class=\"grid\">\n\
+             <tr><th>Fájl</th><th class=\"num\">Méret</th><th class=\"num\">Letöltve</th>\
+             <th class=\"num\">Visszaseedelve</th><th class=\"num\">Arány</th>\
+             <th>Seed kötelezettség</th><th>Megnézve</th><th>Törlés</th><th></th></tr>\n\
+             {rows}</table></div></details>\n",
+            open = if group.open { " open" } else { "" },
+            title = html_escape(&group.title),
+            summary = html_escape(&group.summary),
+            owed_class = group.owed_class,
+            owed_label = html_escape(&group.owed_label),
+            owed_detail = if group.owed_detail.is_empty() {
+                String::new()
+            } else {
+                format!("<span class=\"note\"> {}</span>", html_escape(&group.owed_detail))
+            },
+            rows = render_rows(&group.rows),
+        ));
+    }
+    out
+}
+
 fn render_rows(rows: &[DownloadRow]) -> String {
     if rows.is_empty() {
-        return "<tr><td colspan=\"9\" class=\"note\">Még nincs letöltés.</td></tr>".into();
+        return "<tr><td colspan=\"9\" class=\"note\">Nincs kiszolgált fájl.</td></tr>".into();
     }
     let mut out = String::new();
     for row in rows {
@@ -408,7 +461,7 @@ pub enum PageState {
         network: NetworkView,
     },
     Downloads {
-        rows: Vec<DownloadRow>,
+        groups: Vec<TorrentGroup>,
         /// When the tracker's list was last read, and what it said.
         tracker_note: String,
         /// What was watched and when, newest first.
@@ -1238,6 +1291,20 @@ mod tests {
         assert_eq!(percent_or_current("most of it", 90), 90);
     }
 
+    /// One torrent's worth of rows, as the page takes them.
+    fn group(rows: Vec<DownloadRow>) -> TorrentGroup {
+        TorrentGroup {
+            hash: "abc123".into(),
+            title: "A hegyi doktor S19".into(),
+            summary: "2 fájl, 1 megnézve, 964.42 MiB".into(),
+            owed_label: "igen".into(),
+            owed_class: "owed-yes",
+            owed_detail: "még 36 óra 5 perc".into(),
+            open: true,
+            rows,
+        }
+    }
+
     fn row(keep: bool) -> DownloadRow {
         DownloadRow {
             key: "abc123:1".into(),
@@ -1263,7 +1330,7 @@ mod tests {
     #[test]
     fn a_download_row_shows_why_it_is_still_there() {
         let html = page(PageState::Downloads {
-            rows: vec![row(false)],
+            groups: vec![group(vec![row(false)])],
             history: vec![("2026-08-08 19:30".into(), "Soulm8te.2026.2160p".into())],
             tracker_note: "2 open obligation(s), read just now.".into(),
             message: None,
@@ -1299,7 +1366,7 @@ mod tests {
     #[test]
     fn the_keep_button_toggles() {
         let not_kept = page(PageState::Downloads {
-            rows: vec![row(false)],
+            groups: vec![group(vec![row(false)])],
             history: vec![("2026-08-08 19:30".into(), "Soulm8te.2026.2160p".into())],
             tracker_note: String::new(),
             message: None,
@@ -1308,7 +1375,7 @@ mod tests {
         assert!(not_kept.contains(">Megtartás<"));
 
         let kept = page(PageState::Downloads {
-            rows: vec![row(true)],
+            groups: vec![group(vec![row(true)])],
             history: vec![("2026-08-08 19:30".into(), "Soulm8te.2026.2160p".into())],
             tracker_note: String::new(),
             message: None,
@@ -1324,7 +1391,7 @@ mod tests {
         r.title = "<script>alert(1)</script>".into();
         r.key = "\" onmouseover=\"evil()".into();
         let html = page(PageState::Downloads {
-            rows: vec![r],
+            groups: vec![group(vec![r])],
             history: vec![("2026-08-08 19:30".into(), "Soulm8te.2026.2160p".into())],
             tracker_note: String::new(),
             message: None,
@@ -1336,7 +1403,7 @@ mod tests {
     #[test]
     fn an_empty_library_says_so() {
         let html = page(PageState::Downloads {
-            rows: Vec::new(),
+            groups: Vec::new(),
             history: vec![("2026-08-08 19:30".into(), "Soulm8te.2026.2160p".into())],
             tracker_note: "The tracker has not been asked yet in this session.".into(),
             message: None,

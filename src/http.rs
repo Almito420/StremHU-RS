@@ -223,6 +223,7 @@ pub async fn serve() -> Result<()> {
         .route("/ui/downloads/delete", post(ui_delete_download))
         .route("/ui/downloads/refresh-tracker", post(ui_refresh_tracker))
         .route("/ui/downloads/dry-run", post(ui_dry_run))
+        .route("/ui/downloads/sweep-now", post(ui_sweep_now))
         .route("/ui/save-network", post(ui_save_network))
         .merge(addon)
         .with_state(state.clone());

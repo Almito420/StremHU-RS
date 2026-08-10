@@ -381,12 +381,30 @@ impl NcoreClient {
     ///
     /// This is the authoritative answer to "may I delete this yet", and it beats any
     /// local timer: the tracker knows what it is owed, a local clock only knows when
-    /// a file appeared. `showall=false` is essential — measured, the same page with
-    /// `showall=true` returns 139 entries, being everything run in the past period,
-    /// while `false` returns only the obligations still open.
+    /// a file appeared.
+    ///
+    /// The page comes in two forms and both are needed. `showall=false` is the short list, the
+    /// obligations still open: measured, ten entries. `showall=true` is everything the tracker
+    /// has a record of: measured on the same account and minute, a hundred and forty-eight.
+    ///
+    /// The difference between them is the information that was missing. A torrent on neither
+    /// list is one the tracker has not processed yet, and its absence from the short list says
+    /// nothing; a torrent on the long list but not the short one has genuinely settled its debt.
+    /// Reading only the short list made those two look the same, which is either a download kept
+    /// for no reason or one deleted while it still owed.
     pub async fn hit_and_run(&self) -> Result<Vec<HitAndRun>> {
+        self.hit_and_run_list(false).await
+    }
+
+    /// Everything the tracker has a record of, settled or not.
+    pub async fn hit_and_run_all(&self) -> Result<Vec<HitAndRun>> {
+        self.hit_and_run_list(true).await
+    }
+
+    async fn hit_and_run_list(&self, show_all: bool) -> Result<Vec<HitAndRun>> {
         let mut url = self.base.join(HITNRUN_PATH)?;
-        url.query_pairs_mut().append_pair("showall", "false");
+        url.query_pairs_mut()
+            .append_pair("showall", if show_all { "true" } else { "false" });
         let body = self
             .get(url)
             .await?

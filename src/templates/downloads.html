@@ -2,21 +2,10 @@
 <p class="sub"><a href="/ui">Beállítások</a> &middot; <b>Letöltések</b></p>
 {{message}}
 
-<div class="card scroll">
-  <table class="grid">
-    <tr>
-      <th>Cím</th>
-      <th class="num">Méret</th>
-      <th class="num">Letöltve</th>
-      <th class="num">Visszaseedelve</th>
-      <th class="num">Arány</th>
-      <th>Seed kötelezettség</th>
-      <th>Megnézve</th>
-      <th>Törlés</th>
-      <th></th>
-    </tr>
-    {{rows}}
-  </table>
+<div class="card">
+  <p class="note">Egy sor egy torrent. Nyisd le, és ott vannak a belőle kiszolgált fájlok, mert
+    a seedelési kötelezettség a torrenté, a megnézettség és a törlés viszont fájlonként megy.</p>
+  {{groups}}
 </div>
 
 <form method="post" action="/ui/downloads/refresh-tracker" class="card">
@@ -26,6 +15,14 @@
   <p class="note">Naponta egyszer kérdezi meg magától, közvetlenül a törlési kör előtt.
     Ez a gomb azért van, hogy csak akkor menjen kérés, amikor te akarod. A letöltve, a
     visszaseedelve és az arány is innen frissül.</p>
+</form>
+
+<form method="post" action="/ui/downloads/sweep-now" class="card"
+      onsubmit="return confirm('Lefuttatod a törlési kört most? Amit a próbafutás felsorolt, az tényleg törlődik.')">
+  <h2>Törlési kör futtatása most</h2>
+  <p class="note">Ugyanaz, mint az esti kör: megkérdezi a trackert, végigmegy a szabályokon, és
+    ami törölhető, azt törli. Előtte érdemes lentebb megnézni a próbafutással, mi menne.</p>
+  <button type="submit" class="danger">Futtasd most</button>
 </form>
 
 <form method="post" action="/ui/downloads/dry-run" class="card">

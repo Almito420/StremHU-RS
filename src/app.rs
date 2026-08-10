@@ -228,6 +228,31 @@ impl AppState {
     /// is cached too: "we could not ask" is information, and it is the state in which
     /// nothing may be deleted.
     pub(crate) async fn refresh_owed(&self) -> Result<Vec<crate::ncore::HitAndRun>> {
+        // The full list first, because it is what tells us which torrents the tracker knows at
+        // all. Its figures are the evidence behind a "nothing owed" answer; without them the
+        // short list's silence could equally mean the tracker has not got round to the torrent.
+        //
+        // A failure here is not fatal: the short list below is what decides deletions, and
+        // recording fewer figures only makes the rules more cautious.
+        match self.ncore.read().await.hit_and_run_all().await {
+            Ok(all) => {
+                let now = crate::state::now();
+                for e in &all {
+                    self.store
+                        .record_tracker_figures(
+                            &e.torrent_id,
+                            e.uploaded_bytes,
+                            e.downloaded_bytes,
+                            &e.ratio,
+                            now,
+                        )
+                        .await;
+                }
+                tracing::info!(count = all.len(), "the tracker's full activity list was read");
+            }
+            Err(e) => tracing::warn!(error = %e, "could not read the tracker's full list"),
+        }
+
         let result = self.ncore.read().await.hit_and_run().await;
         let mut snapshot = self.owed.write().await;
         snapshot.fetched_at = Some(crate::state::now());

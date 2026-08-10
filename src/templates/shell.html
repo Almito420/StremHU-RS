@@ -58,6 +58,22 @@ table.grid td.owed-cell{white-space:nowrap}
 table.grid td.owed-yes{color:var(--err);font-weight:600}
 table.grid td.owed-no{color:var(--ok);font-weight:600}
 table.grid td.owed-unknown{color:var(--mut)}
+/* One torrent per line, opening to its files. Built on <details> so it needs no script:
+   the page has to work with nothing loaded from anywhere. */
+details.grp{border:1px solid var(--line);border-radius:8px;margin:8px 0;background:#0e1015}
+details.grp>summary{cursor:pointer;padding:10px 12px;display:flex;gap:14px;align-items:baseline;
+  flex-wrap:wrap;list-style:none}
+details.grp>summary::-webkit-details-marker{display:none}
+details.grp>summary::before{content:"\25B8";color:var(--mut);margin-right:2px}
+details.grp[open]>summary::before{content:"\25BE"}
+details.grp[open]>summary{border-bottom:1px solid var(--line)}
+summary .gt{font-weight:600;flex:1 1 380px;word-break:break-all}
+summary .gs{color:var(--mut);font-size:13px}
+summary .go{font-size:13px;white-space:nowrap}
+summary .go.owed-yes{color:var(--err);font-weight:600}
+summary .go.owed-no{color:var(--ok);font-weight:600}
+summary .go.owed-unknown{color:var(--mut)}
+details.grp table.grid{margin:0}
 a{color:var(--acc)}
 form{margin:0}
 </style>

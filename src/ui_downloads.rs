@@ -49,6 +49,24 @@ pub(crate) async fn ui_set_watched(
     downloads_page(&state, Some(message)).await
 }
 
+/// What to call a torrent on the page.
+///
+/// The folder its files were written into, which libtorrent names after the torrent itself for
+/// anything with more than one file. A single-file torrent has no folder of its own, and then the
+/// caller falls back to the file's name, which is the whole of what it is anyway.
+fn release_name(items: &[crate::state::Item], hash: &str) -> Option<String> {
+    let item = items.iter().find(|i| i.info_hash == hash)?;
+    let path = std::path::Path::new(&item.save_path);
+    let parent = path.parent()?;
+    let name = parent.file_name()?.to_string_lossy().to_string();
+    // The download folder itself is not a release name.
+    let root = std::path::Path::new(&item.save_path)
+        .parent()
+        .and_then(|p| p.parent())
+        .is_some();
+    (root && name.to_lowercase() != "downloads").then_some(name)
+}
+
 /// The seeding obligation as one word and a colour.
 ///
 /// Three states on purpose. Presence on the tracker's hit-and-run list means seeding is still
@@ -65,6 +83,12 @@ fn owed_label(
         return ("?", "owed-unknown");
     }
     if !asked_now && item.owed_checked_at.is_none() {
+        return ("?", "owed-unknown");
+    }
+    // The same standard the deletion decision uses. Without figures the tracker has no record of
+    // this torrent, and a green "no" next to a download the rules will not release is the page
+    // contradicting the behaviour.
+    if !owes && item.tracker_figures_at.is_none() {
         return ("?", "owed-unknown");
     }
     if owes {
@@ -95,6 +119,9 @@ fn owed_detail(
             Some(secs) => format!("még {}", crate::webui::human_duration(secs)),
             None => "a hátralévő időt nem írta ki".into(),
         };
+    }
+    if !owes && item.tracker_figures_at.is_none() {
+        return "a tracker még nem tud erről a torrentről".into();
     }
     match (asked_now, item.owed_checked_at) {
         (true, _) => "épp most kérdeztük".into(),
@@ -167,6 +194,7 @@ pub(crate) async fn downloads_page(state: &AppState, message: Option<String>) ->
             // A stored answer counts, but only if nothing has been taken from the torrent
             // since it was given: a later download is a new obligation the answer predates.
             tracker_says_clear: !item.ncore_torrent_id.is_empty()
+                && item.tracker_figures_at.is_some()
                 && !owes
                 && (asked_now
                     || item.owed_checked_at.is_some_and(|at| {
@@ -330,8 +358,59 @@ pub(crate) async fn downloads_page(state: &AppState, message: Option<String>) ->
         })
         .collect();
 
+    // Grouped by torrent, in the order the rows already came in, so the newest download leads.
+    let mut groups: Vec<crate::webui::TorrentGroup> = Vec::new();
+    for row in rows {
+        let hash = row.key.split(':').next().unwrap_or("").to_string();
+        match groups.iter_mut().find(|g| g.hash == hash) {
+            Some(g) => g.rows.push(row),
+            None => groups.push(crate::webui::TorrentGroup {
+                hash,
+                title: String::new(),
+                summary: String::new(),
+                owed_label: String::new(),
+                owed_class: "owed-unknown",
+                owed_detail: String::new(),
+                open: false,
+                rows: vec![row],
+            }),
+        }
+    }
+    // The group's own line: what the torrent is, and what it owes. The obligation is the
+    // torrent's, so it is said once here rather than repeated on every file.
+    for g in groups.iter_mut() {
+        let first = &g.rows[0];
+        g.title = release_name(&all_items, &g.hash)
+            .unwrap_or_else(|| first.title.clone());
+        let files = g.rows.len();
+        let watched = g
+            .rows
+            .iter()
+            .filter(|r| r.watched == "megnézve")
+            .count();
+        let bytes: u64 = all_items
+            .iter()
+            .filter(|i| i.info_hash == g.hash)
+            .map(|i| i.file_len)
+            .sum();
+        g.summary = if files == 1 {
+            crate::webui::human_size(bytes)
+        } else {
+            format!(
+                "{files} fájl, {watched} megnézve, {}",
+                crate::webui::human_size(bytes)
+            )
+        };
+        g.owed_label = first.owed_label.clone();
+        g.owed_class = first.owed_class;
+        g.owed_detail = first.owed_detail.clone();
+        // Opened when something in it is about to go, so a deletion is never hidden behind a
+        // closed row.
+        g.open = g.rows.iter().any(|r| r.verdict_short == "következő kör");
+    }
+
     html(crate::webui::page(crate::webui::PageState::Downloads {
-        rows,
+        groups,
         tracker_note,
         history,
         message,
@@ -452,6 +531,41 @@ pub(crate) async fn ui_delete_download(
 /// it reports is what would be done rather than a second guess at it. Deletion being
 /// switched off is ignored for the purpose, because deciding whether to switch it on is the
 /// reason to ask.
+/// Runs the deletion round now, exactly as the evening one does.
+///
+/// The same code path as the schedule and the one at startup, so what it does here is what it
+/// will do unattended. Only the trigger differs, and the message says which.
+pub(crate) async fn ui_sweep_now(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(page) = require_login(&state, cookie_header(&headers)).await {
+        return page;
+    }
+    let world = ServerWorld {
+        state: state.clone(),
+    };
+    let report = crate::maintenance::run_once(&world, &state.store, "Kézi takarítás").await;
+    state.store.set_last_sweep_at(crate::state::now()).await;
+
+    let message = if let Some(why) = &report.abandoned {
+        format!("A kör megállt: {why}. Ilyenkor semmi nem törlődik.")
+    } else if report.deleted.is_empty() {
+        format!(
+            "Lefutott, egyet sem törölt a {} letöltésből.",
+            report.considered
+        )
+    } else {
+        format!(
+            "Törölve {} db, felszabadult {}: {}.",
+            report.deleted.len(),
+            crate::media::size_label(report.freed_bytes),
+            report.deleted.join(", ")
+        )
+    };
+    downloads_page(&state, Some(message)).await
+}
+
 pub(crate) async fn ui_dry_run(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     if let Some(page) = require_login(&state, cookie_header(&headers)).await {
         return page;

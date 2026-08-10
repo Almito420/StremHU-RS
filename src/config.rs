@@ -469,12 +469,17 @@ pub struct Candidate {
     pub watched: bool,
     /// The tracker itself lists this torrent as still owing seed time.
     pub owed_to_tracker: bool,
-    /// The tracker was asked, and said this torrent owes nothing.
+    /// The tracker was asked, it has figures for this torrent, and it says nothing is owed.
     ///
-    /// Separate from `!owed_to_tracker`, which is also what an unanswered question looks like.
-    /// This one means an answer was received, it was a no, and it is not older than the newest
-    /// file taken from the torrent — a download after the answer would have created a new
-    /// obligation the answer knows nothing about.
+    /// All three parts matter. `!owed_to_tracker` on its own is also what an unanswered question
+    /// looks like, and the answer must not predate the newest file taken from the torrent.
+    ///
+    /// And the tracker has to actually know the torrent. Measured on a real one: four episodes
+    /// pulled from a pack forty minutes earlier, fourteen gigabytes in all, and the tracker's own
+    /// page listed it nowhere and reported zero downloaded and zero uploaded against it. Absence
+    /// from the hit-and-run list meant "no opinion yet", not "nothing owed", and treating the two
+    /// alike is how an account collects its first hit and run. Its figures are the proof that it
+    /// has seen the torrent at all, so without them there is no clear answer to act on.
     pub tracker_says_clear: bool,
     /// Files inside the torrent were deliberately skipped, so it can never be a complete
     /// seed. One episode out of a season pack is the usual case.
@@ -1019,6 +1024,43 @@ mod tests {
             tracker_downloaded: 7 * 1024 * 1024 * 1024,
             tracker_uploaded: 7 * 1024 * 1024 * 1024,
         }
+    }
+
+    /// A tracker that has never heard of a torrent is not a tracker saying the debt is paid.
+    ///
+    /// The numbers are from the real case: four episodes taken from a pack forty minutes
+    /// earlier, and the tracker's page carried no row for it at all, so nothing downloaded and
+    /// nothing uploaded were recorded against it. The rule that trusts a clear answer would have
+    /// deleted all four, which is precisely how a hit and run happens.
+    #[test]
+    fn silence_from_the_tracker_is_not_a_clear_answer() {
+        let fresh = Candidate {
+            // No figures, because the torrent never appeared on the tracker's page.
+            figures_known: false,
+            tracker_downloaded: 0,
+            tracker_uploaded: 0,
+            tracker_says_clear: false,
+            owed_to_tracker: false,
+            seeded_secs: 40 * 60,
+            file_seeded_secs: 40 * 60,
+            is_keeper: true,
+            ..ripe()
+        };
+        assert_eq!(
+            deleting().verdict(&fresh),
+            Verdict::Keep("még nem seedeltünk eleget"),
+            "with nothing known, the flat setting is what protects it"
+        );
+
+        // The same file as a non-keeper is held by its own flat fallback.
+        let sibling = Candidate {
+            is_keeper: false,
+            ..fresh
+        };
+        assert_eq!(
+            deleting().verdict(&sibling),
+            Verdict::Keep("még nem seedeltünk eleget ezzel a fájllal")
+        );
     }
 
     /// The tracker's own answer settles it, and this is the case that made the rule.

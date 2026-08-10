@@ -204,7 +204,10 @@ pub async fn sweep_with<W: World>(
                 && owed.iter().any(|id| *id == item.ncore_torrent_id),
             // The list was read at the top of this run, and a run whose read failed was
             // abandoned before reaching here, so absence from it is an answer of now.
+            // Only when the tracker has figures for this torrent: without them its silence
+            // is ignorance, not an answer.
             tracker_says_clear: !item.ncore_torrent_id.is_empty()
+                && item.tracker_figures_at.is_some()
                 && !owed.iter().any(|id| *id == item.ncore_torrent_id),
             partial: item.partial,
             streaming: streaming.iter().any(|h| *h == item.info_hash),

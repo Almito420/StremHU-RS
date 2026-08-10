@@ -91,8 +91,23 @@ pub fn extras_worth_completing(sizes: &[u64], skip: &[usize], limit: u64) -> Vec
     if limit == 0 {
         return Vec::new();
     }
+    // The largest file we are actually serving, as the yardstick.
+    let wanted = skip.iter().filter_map(|i| sizes.get(*i)).copied().max().unwrap_or(0);
     (0..sizes.len())
-        .filter(|i| !skip.contains(i) && sizes[*i] <= limit)
+        .filter(|i| {
+            if skip.contains(i) {
+                return false;
+            }
+            let size = sizes[*i];
+            // Small in absolute terms, and small next to what we came for.
+            //
+            // The second test is what makes this safe on a pack of small files. Measured on a
+            // real one: an XviD rip of a whole series, every episode 346 MB, so every episode
+            // fell under a threshold meant for samples and nfos and the server fetched all
+            // twenty-two of them, 7.44 GiB, to serve one. A sample is a percent or two of the
+            // film it belongs to; a sibling episode is the same size as the one being watched.
+            size <= limit && size.saturating_mul(4) <= wanted
+        })
         .collect()
 }
 
@@ -255,6 +270,21 @@ mod tests {
         sizes.push(17_595); // the nfo
         let extras = extras_worth_completing(&sizes, &[3], 512 * 1024 * 1024);
         assert_eq!(extras, vec![10], "only the nfo");
+    }
+
+    /// The case that cost 7.44 GiB: an XviD rip of a whole series, every episode 346 MB. Each
+    /// one fits under a threshold meant for samples, so the absolute limit alone pulled the
+    /// entire series down to serve one episode.
+    #[test]
+    fn a_pack_of_small_episodes_is_not_mistaken_for_companion_files() {
+        let mut sizes = vec![346 * 1024 * 1024u64; 22];
+        sizes.push(2_400); // the nfo
+        let extras = extras_worth_completing(&sizes, &[5], 512 * 1024 * 1024);
+        assert_eq!(extras, vec![22], "the nfo, and none of the twenty-one other episodes");
+
+        // The film case still works: a sample is a fraction of what it accompanies.
+        let film = [99_000_000u64, 8_962_000_000, 3_500];
+        assert_eq!(extras_worth_completing(&film, &[1], 512 * 1024 * 1024), vec![0, 2]);
     }
 
     /// A second episode already being served must not be touched: dropping it to a low

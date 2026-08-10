@@ -179,7 +179,10 @@ pub(crate) async fn play(
         }
     };
 
-    let (info_hash, entry) = match state.lib.add(&bytes, want, &save_dir).await {
+    // The library answers with the record's key, not the info hash: one torrent can serve
+    // several files, so the key carries the file index too. What goes into the record is the
+    // hash itself, from the entry, or the key ends up with the index in it twice.
+    let (_key, entry) = match state.lib.add(&bytes, want, &save_dir).await {
         Ok(pair) => pair,
         Err(e) => {
             tracing::warn!(error = %e, "could not open the torrent");
@@ -193,12 +196,12 @@ pub(crate) async fn play(
 
     // Kept so the torrent can be restored after a restart without asking the tracker
     // for the file again, and so deletion has something to clean up.
-    let torrent_file = save_torrent_file(&cfg, &info_hash, &bytes);
+    let torrent_file = save_torrent_file(&cfg, &entry.info_hash, &bytes);
 
     state
         .store
         .upsert(crate::state::Item {
-            info_hash: info_hash.clone(),
+            info_hash: entry.info_hash.clone(),
             ncore_torrent_id: torrent_id.clone(),
             title: entry.file_name.clone(),
             file_name: entry.file_name.clone(),

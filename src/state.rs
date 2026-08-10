@@ -286,6 +286,43 @@ impl Item {
 
 }
 
+/// Combines two records of the same file, keeping whatever either of them knew.
+///
+/// Only reachable through the repair above, where one download had come to have two records.
+/// Nothing is thrown away that a person would notice: the earliest arrival, the most viewings,
+/// the furthest point reached, either flag having been set, and the union of what was served.
+fn merge(a: Item, b: Item) -> Item {
+    let mut out = if a.play_count >= b.play_count { a.clone() } else { b.clone() };
+    out.added_at = a.added_at.min(b.added_at);
+    out.completed_at = match (a.completed_at, b.completed_at) {
+        (Some(x), Some(y)) => Some(x.min(y)),
+        (x, y) => x.or(y),
+    };
+    out.first_played_at = match (a.first_played_at, b.first_played_at) {
+        (Some(x), Some(y)) => Some(x.min(y)),
+        (x, y) => x.or(y),
+    };
+    out.last_played_at = a.last_played_at.max(b.last_played_at);
+    out.play_count = a.play_count.max(b.play_count);
+    out.furthest_byte = a.furthest_byte.max(b.furthest_byte);
+    out.keep = a.keep || b.keep;
+    out.watched_manually = a.watched_manually || b.watched_manually;
+    out.owed_to_tracker = a.owed_to_tracker || b.owed_to_tracker;
+    out.owed_checked_at = a.owed_checked_at.max(b.owed_checked_at);
+    out.tracker_figures_at = a.tracker_figures_at.max(b.tracker_figures_at);
+    out.tracker_downloaded_bytes = a.tracker_downloaded_bytes.max(b.tracker_downloaded_bytes);
+    out.tracker_uploaded_bytes = a.tracker_uploaded_bytes.max(b.tracker_uploaded_bytes);
+    // Coverage is a bitmap of what was actually sent, so the union is the honest answer.
+    let len = a.served_map.len().max(b.served_map.len());
+    let mut map = vec![0u8; len];
+    for (i, byte) in map.iter_mut().enumerate() {
+        *byte = a.served_map.get(i).copied().unwrap_or(0)
+            | b.served_map.get(i).copied().unwrap_or(0);
+    }
+    out.served_map = map;
+    out
+}
+
 /// Drops a leading byte order mark.
 ///
 /// Windows text editors and PowerShell's own redirection write one by default, and both
@@ -378,19 +415,28 @@ impl Store {
         // Re-keyed from the items themselves, so a file written when records were keyed by
         // info hash alone loads without a migration step and without losing anything. An item
         // with no info hash keeps whatever key it had rather than being dropped.
+        //
+        // The info hash is repaired too. A record written while the library was handing back
+        // keys instead of hashes had `hash:0` in that field, which made its key `hash:0:0` and
+        // left it in a group of its own: the same download appeared twice, once correctly and
+        // once as a stranger. Everything after the first colon is dropped, and if that lands on
+        // a record that already exists the two are merged rather than one overwriting the other.
         let mut state = state;
-        let rekeyed: BTreeMap<String, Item> = state
-            .items
-            .into_iter()
-            .map(|(old_key, item)| {
-                let key = if item.info_hash.is_empty() {
-                    old_key
-                } else {
-                    item.key()
-                };
-                (key, item)
-            })
-            .collect();
+        let mut rekeyed: BTreeMap<String, Item> = BTreeMap::new();
+        for (old_key, mut item) in state.items {
+            if let Some((hash, _)) = item.info_hash.split_once(':') {
+                item.info_hash = hash.to_string();
+            }
+            let key = if item.info_hash.is_empty() {
+                old_key
+            } else {
+                item.key()
+            };
+            match rekeyed.remove(&key) {
+                Some(existing) => rekeyed.insert(key, merge(existing, item)),
+                None => rekeyed.insert(key, item),
+            };
+        }
         state.items = rekeyed;
 
         Ok(Arc::new(Self {
@@ -761,6 +807,37 @@ mod tests {
             "but its torrent has been seeding for a hundred"
         );
         assert_eq!(first.torrent_seeded_for(&all, now) / 3600, 100);
+    }
+
+    /// A record written while the library handed back keys instead of hashes had `hash:0` in its
+    /// info hash field, so its own key became `hash:0:0` and the same download appeared twice.
+    /// Loading has to repair that and keep what both copies knew.
+    #[tokio::test]
+    async fn a_doubled_key_is_repaired_and_merged_on_load() {
+        let path = temp_path("doubled-key.json");
+        let _ = std::fs::remove_file(&path);
+        let json = r#"{"items":{
+            "aaaa:0": {"info_hash":"aaaa","file_index":0,"file_len":1000,"play_count":1,
+                       "furthest_byte":900,"added_at":100},
+            "aaaa:0:0": {"info_hash":"aaaa:0","file_index":0,"file_len":1000,"play_count":0,
+                         "watched_manually":true,"added_at":50,"keep":true}
+        }}"#;
+        std::fs::write(&path, json).expect("writes");
+
+        let store = Store::load(&path).expect("loads");
+        let items = store.items().await;
+        assert_eq!(items.len(), 1, "one download, one record");
+        let item = &items[0];
+        assert_eq!(item.info_hash, "aaaa", "the hash is a hash again");
+        assert_eq!(item.key(), "aaaa:0");
+        // Nothing either copy knew is lost.
+        assert_eq!(item.play_count, 1);
+        assert_eq!(item.furthest_byte, 900);
+        assert_eq!(item.added_at, 50, "the earlier arrival wins");
+        assert!(item.keep);
+        assert!(item.watched_manually);
+
+        let _ = std::fs::remove_file(&path);
     }
 
     /// The keeper is the newest finished file, and a torrent with nothing finished keeps
