@@ -1,0 +1,43 @@
+<h1>Letöltések</h1>
+<p class="sub"><a href="/ui">Beállítások</a> &middot; <b>Letöltések</b></p>
+{{message}}
+
+<div class="card scroll">
+  <table class="grid">
+    <tr>
+      <th>Cím</th>
+      <th class="num">Méret</th>
+      <th class="num">Letöltve</th>
+      <th class="num">Visszaseedelve</th>
+      <th class="num">Arány</th>
+      <th>Seed kötelezettség</th>
+      <th>Megnézve</th>
+      <th>Törlés</th>
+      <th></th>
+    </tr>
+    {{rows}}
+  </table>
+</div>
+
+<form method="post" action="/ui/downloads/refresh-tracker" class="card">
+  <h2>Seedelési kötelezettségek</h2>
+  <p class="note">{{tracker_note}}</p>
+  <button type="submit" class="ghost">Kérdezzük meg most a trackert</button>
+  <p class="note">Naponta egyszer kérdezi meg magától, közvetlenül a törlési kör előtt.
+    Ez a gomb azért van, hogy csak akkor menjen kérés, amikor te akarod. A letöltve, a
+    visszaseedelve és az arány is innen frissül.</p>
+</form>
+
+<form method="post" action="/ui/downloads/dry-run" class="card">
+  <h2>Próbafutás</h2>
+  <p class="note">Végigmegy ugyanazon a logikán, mint az esti törlés, de nem töröl semmit.
+    Azt mutatja meg, mi történne, ha az automatikus törlés be lenne kapcsolva.</p>
+  <button type="submit" class="ghost">Mit törölne most?</button>
+</form>
+
+<div class="card">
+  <h2>Mit néztünk</h2>
+  {{history}}
+  <p class="note">Egy sor egy leülés. Egy lejátszó sok kérést küld egy film alatt, ezért a
+    15 percen belüli kérések egy leülésnek számítanak.</p>
+</div>

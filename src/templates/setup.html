@@ -1,0 +1,10 @@
+<h1>Első indítás</h1>
+<p class="sub">Adj meg egy admin jelszót. Minden mást belépés után tudsz beállítani.</p>
+<form method="post" action="/ui/setup" class="card">
+  <label for="p">Jelszó, legalább 8 karakter</label>
+  <input id="p" name="password" type="password" autocomplete="new-password" required minlength="8">
+  <label for="p2">Még egyszer</label>
+  <input id="p2" name="password2" type="password" autocomplete="new-password" required minlength="8">
+  <button type="submit">Jelszó beállítása</button>
+  <p class="note">A konfigurációs fájlba Argon2 hashként kerül, sosem olvasható formában.</p>
+</form>

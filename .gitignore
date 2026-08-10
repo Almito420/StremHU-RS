@@ -1,0 +1,21 @@
+# Build output.
+/target
+/shim/build
+
+# The server's own data and secrets. None of this belongs in a repository: the
+# configuration holds tracker credentials and the key that signs login tokens, the
+# .torrent files carry the account's passkey in their announce URL, the state file is a
+# record of what was watched, and the certificate folder holds a private key.
+config.toml
+state.json
+state.json.*
+/downloads
+/torrents
+/certs
+*.log
+
+# What the build produces and the release ships, rather than what it is built from.
+*.exe
+*.dll
+*.pdb
+*.zip

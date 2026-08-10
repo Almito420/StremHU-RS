@@ -1,0 +1,181 @@
+<h1>Beállítások</h1>
+<p class="sub"><b>Beállítások</b> &middot; <a href="/ui/downloads">Letöltések</a></p>
+{{message}}
+
+<div class="card">
+  <h2>Állapot</h2>
+  {{live}}
+</div>
+
+<div class="card">
+  <h2>Hozzáadás a Stremióhoz</h2>
+  <label for="au">Addon URL</label>
+  <input id="au" value="{{addon_url}}" readonly onclick="this.select()">
+  <p class="note"><a href="{{addon_url}}" target="_blank" rel="noreferrer">Manifest megnyitása</a>
+    gombbal ellenőrizheted, hogy a szerver válaszol. A fenti mezőre kattintva kijelölődik az URL.</p>
+  <p class="note">{{addon_note}}</p>
+  <p class="note">{{https_state}}</p>
+</div>
+
+<form method="post" action="/ui/save-network" class="card">
+  <h2>Hálózat</h2>
+  <div class="row">
+    <div>
+      <label for="hi">A gép címe a hálózaton</label>
+      <input id="hi" name="host_ip" value="{{host_ip}}" placeholder="192.168.1.100">
+    </div>
+    <div>
+      <label for="hp">HTTPS port</label>
+      <input id="hp" name="https_port" type="number" min="1" max="65535" value="{{https_port}}">
+    </div>
+  </div>
+  <label class="check"><input type="checkbox" name="enable_https"{{enable_https}}>
+    HTTPS kiszolgálás, ez kell ahhoz, hogy más eszköz is tudjon kapcsolódni</label>
+  <button type="submit">Mentés</button>
+  <p class="note">A tanúsítványt ehhez a címhez a szerver magától letölti, és lejárat előtt
+    megújítja. A cím és a port módosítása után újraindítás kell.</p>
+</form>
+
+<form method="post" action="/ui/save-common" class="card">
+  <h2>nCore</h2>
+  <div class="row">
+    <div><label for="nu">Felhasználónév</label><input id="nu" name="ncore_username" autocomplete="off"></div>
+    <div><label for="np">Jelszó</label><input id="np" name="ncore_password" type="password" autocomplete="off"></div>
+  </div>
+  <h2>TMDB</h2>
+  <div class="row">
+    <div><label for="tk">API kulcs</label><input id="tk" name="tmdb_api_key" autocomplete="off"></div>
+    <div><label for="tl">Nyelv</label><input id="tl" name="tmdb_language" placeholder="hu-HU"></div>
+  </div>
+  <button type="submit">Mentés</button>
+  <p class="note">Az üresen hagyott mező változatlan marad, tehát a jelszót nem kell újra beírni.</p>
+</form>
+
+<form method="post" action="/ui/save-retention" class="card">
+  <h2>Mit tart meg a szerver</h2>
+  <div class="row">
+    <div>
+      <label for="ks">Seedelés legalább (nap)</label>
+      <input id="ks" name="keep_seed_days" type="number" min="1" value="{{keep_seed_days}}">
+    </div>
+    <div>
+      <label for="rt">Elhagyott .torrent fájlok megtartása (nap)</label>
+      <input id="rt" name="retention_days" type="number" min="1" value="{{retention_days}}">
+    </div>
+    <div>
+      <label for="sw">A törlés ekkor fut (minden nap)</label>
+      <input id="sw" name="sweep_at" type="time" value="{{sweep_at}}">
+    </div>
+  </div>
+  <div class="row">
+    <div>
+      <label for="wp">Megnézettnek számít (a film %-ától)</label>
+      <input id="wp" name="watched_position_percent" type="number" min="1" max="100"
+             value="{{watched_position_percent}}">
+    </div>
+    <div>
+      <label for="ws">És csak ha ennyit ki is szolgáltunk (%)</label>
+      <input id="ws" name="watched_min_served_percent" type="number" min="1" max="100"
+             value="{{watched_min_served_percent}}">
+    </div>
+  </div>
+  <p class="note">A 90% ott van, ahol a legtöbb filmnél a stáblista kezdődik. A második szám
+    azt akadályozza meg, hogy egy végére ugrás egész végignézésnek számítson.</p>
+  <p class="note">A törlés feltétele a megnézettség és a seedelési kötelezettség, nem az
+    életkor. Egy csomagból az a fájl, aminek a saját seedelési ideje letelt, elmehet; a
+    legutóbb elkészült fájl viszont marad, mert az tartja életben a torrentet és azzal fogy
+    tovább a tartozás. Egy torrent utolsó fájlja csak akkor megy, ha a teljes tartozása
+    letelt.</p>
+  <label class="check"><input type="checkbox" name="hit_and_run"{{hit_and_run}}>
+    Soha ne törölje azt, amin a tracker szerint még seedelnünk kell</label>
+  <label class="check"><input type="checkbox" name="require_watched"{{require_watched}}>
+    Csak olyat töröljön, amit legalább egyszer lejátszottunk</label>
+  <label class="check"><input type="checkbox" name="enable_deletion"{{enable_deletion}}>
+    Automatikus törlés. Kikapcsolva soha semmi nem törlődik magától</label>
+  <label for="nw">Értesítés ide, ha kifogy a hely (ntfy vagy Discord webhook)</label>
+  <input id="nw" name="notify_webhook_url" value="{{notify_webhook_url}}"
+         placeholder="https://ntfy.sh/valami-titkos-nev">
+  <button type="submit">Mentés</button>
+  <p class="note">A következő futás: {{next_run}}. Amit a letöltések oldalon megtartásra
+    jelöltél, azt ezektől függetlenül soha nem törli magától.</p>
+</form>
+
+<form method="post" action="/ui/test-notification" class="card">
+  <h2>Értesítés kipróbálása</h2>
+  <p class="note">Kiküld egy üzenetet a fentebb megadott címre, a lemezek pillanatnyi
+    állapotával. Ugyanazon az úton megy, mint egy valódi figyelmeztetés, tehát ha ez megjön,
+    akkor a többi is meg fog.</p>
+  <button type="submit" class="ghost">Küldj egy próbaüzenetet</button>
+</form>
+
+<form method="post" action="/ui/save-engine" class="card">
+  <h2>Motor és lemez</h2>
+  <div class="row">
+    <div>
+      <label for="ma">Egyszerre ennyi torrent lehet aktív</label>
+      <input id="ma" name="max_active_torrents" type="number" min="-1" max="100000"
+             value="{{max_active_torrents}}">
+    </div>
+    <div>
+      <label for="gc">Kapcsolatok felső korlátja összesen</label>
+      <input id="gc" name="global_connections_limit" type="number" min="10" max="10000"
+             value="{{global_connections_limit}}">
+    </div>
+    <div>
+      <label for="cs">Ebből egy futó streamre</label>
+      <input id="cs" name="connections_while_streaming" type="number" min="5" max="1000"
+             value="{{connections_while_streaming}}">
+    </div>
+  </div>
+  <p class="note">Az aktív torrentek száma azért van itt, mert a libtorrent magától
+    öt seedelést engedne, a többit megállítaná: a leállított torrent nem seedel, tehát
+    nem is dolgozza le a kötelezettségét. A &minus;1 jelentése korlátlan.</p>
+  <div class="row">
+    <div>
+      <label for="ce">A torrent maradékát is töltse le, ha az ennél kisebb (MiB)</label>
+      <input id="ce" name="complete_extras_below_mb" type="number" min="0" max="1000000"
+             value="{{complete_extras_below_mb}}">
+    </div>
+  </div>
+  <p class="note">Egy film torrentjében a film mellett ott van egy minta és egy nfo is. Ha
+    ezeket kihagyjuk, a torrent soha nem lesz teljes seed: a tracker örökre 98.94%-ot mutat,
+    és ezen a seedelési idő nem változtat. Ez a beállítás azért van korlátozva, hogy egy
+    évadcsomagnál ne húzza be a másik kilenc részt is. A 0 kikapcsolja.</p>
+  <div class="row">
+    <div>
+      <label for="wb">Figyelmeztetés, ha ennél kevesebb a szabad hely (GiB)</label>
+      <input id="wb" name="warn_below_free_gb" type="number" min="1" max="10000"
+             value="{{warn_below_free_gb}}">
+    </div>
+    <div>
+      <label for="wpc">Vagy ha ennyi százalék alá esik</label>
+      <input id="wpc" name="warn_below_free_percent" type="number" min="0" max="99"
+             value="{{warn_below_free_percent}}">
+    </div>
+  </div>
+  <button type="submit">Mentés</button>
+  <p class="note">A streamre eső kapcsolatszám azonnal érvényes. Az összesített korlát és
+    az aktív torrentek száma a következő indításnál lép életbe, mert ezeket a motor
+    induláskor kapja meg.</p>
+</form>
+
+<form method="post" action="/ui/save-toml" class="card">
+  <h2>Minden más</h2>
+  <label for="t">A teljes konfiguráció</label>
+  <textarea id="t" name="toml" spellcheck="false">{{toml}}</textarea>
+  <button type="submit">Konfiguráció mentése</button>
+  <p class="note">Mentés előtt ellenőrzi. A portok módosítása után újraindítás kell.</p>
+</form>
+
+<form method="post" action="/ui/logout">
+  <button type="submit" class="ghost">Kilépés</button>
+</form>
+
+<form method="post" action="/ui/shutdown" class="card"
+      onsubmit="return confirm('Leállítod a szervert? Ami épp játszik, az megszakad.')">
+  <h2>Szerver leállítása</h2>
+  <button type="submit" class="ghost">Leállítás</button>
+  <p class="note">Nincs konzolablak, amit be lehetne csukni, tehát a szerver innen áll le.
+    Előtte kiírja, amit tud: az állapotot és minden torrent folytatási adatait, hogy a
+    következő indítás ne kezdje újra a már letöltött fájlok ellenőrzését.</p>
+</form>

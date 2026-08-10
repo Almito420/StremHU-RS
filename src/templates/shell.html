@@ -1,0 +1,64 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>stremhu-rs</title>
+<style>
+:root{--bg:#12141a;--fg:#e7e9ee;--mut:#9aa3b2;--line:#252a35;--acc:#5b9dd9;--err:#e06c75;--ok:#98c379}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,Segoe UI,sans-serif}
+/* Wide enough for the downloads table's eight columns without squeezing them. Forms
+   inside stay narrower on their own, so a text field does not stretch across a monitor. */
+main{max-width:1500px;margin:0 auto;padding:32px 20px}
+h1{font-size:20px;margin:0 0 4px}
+h2{font-size:15px;margin:28px 0 10px;color:var(--mut);font-weight:600}
+p.sub{color:var(--mut);margin:0 0 24px}
+label{display:block;margin:12px 0 4px;color:var(--mut);font-size:13px}
+input,textarea{width:100%;padding:9px 11px;background:#0d0f14;color:var(--fg);
+  border:1px solid var(--line);border-radius:6px;font:inherit}
+textarea{font-family:ui-monospace,Consolas,monospace;font-size:13px;min-height:420px}
+button{margin-top:16px;padding:9px 18px;background:var(--acc);color:#08101a;border:0;
+  border-radius:6px;font:inherit;font-weight:600;cursor:pointer}
+button.ghost{background:transparent;color:var(--mut);border:1px solid var(--line)}
+.row{display:flex;gap:12px;flex-wrap:wrap}
+.row>div{flex:1;min-width:220px}
+.err{color:var(--err)}
+.ok{color:var(--ok)}
+.card{border:1px solid var(--line);border-radius:8px;padding:18px;margin-bottom:18px}
+.note{color:var(--mut);font-size:13px;margin-top:8px}
+label.check{display:flex;align-items:center;gap:8px;margin:10px 0 0;color:var(--fg);font-size:14px}
+label.check input{width:auto;margin:0}
+button.danger{background:transparent;color:var(--err);border:1px solid var(--line)}
+table.grid{width:100%;border-collapse:collapse;font-size:13px}
+table.grid th{text-align:left;color:var(--mut);font-size:12px;font-weight:600;
+  padding:0 12px 8px 0;border-bottom:1px solid var(--line);white-space:nowrap}
+table.grid td{padding:10px 12px 10px 0;border-bottom:1px solid var(--line);
+  vertical-align:top}
+table.grid th.num,table.grid td.num{text-align:right;
+  font-variant-numeric:tabular-nums;white-space:nowrap}
+table.grid td.num{font-family:ui-monospace,Consolas,monospace}
+table.grid td.c-title{width:34%;min-width:220px}
+table.grid td .note{margin-top:3px;font-size:12px}
+table.grid td.actions{white-space:nowrap;text-align:right}
+table.grid td.actions form{display:inline-block;margin-left:6px}
+table.grid button{margin-top:0;padding:5px 10px;font-size:12px;white-space:nowrap}
+/* The table has more columns than a narrow window fits; it scrolls rather than
+   squeezing the numbers into unreadable stacks. */
+.scroll{overflow-x:auto}
+.tt{word-break:break-word;line-height:1.35}
+.up{color:var(--ok)}
+.kv{display:flex;justify-content:space-between;gap:16px;padding:7px 0;
+  border-bottom:1px solid var(--line);font-size:14px}
+.kv:last-child{border-bottom:0}
+.kv span{color:var(--mut)}
+.kv b{font-weight:600;text-align:right}
+.owed{color:var(--acc);font-size:12px;margin-top:4px}
+table.grid td.owed-cell{white-space:nowrap}
+/* Red still owes seeding, green is clear, grey means the tracker has not been asked. The
+   colour is not the only carrier: the cell says igen, nem or a question mark as well. */
+table.grid td.owed-yes{color:var(--err);font-weight:600}
+table.grid td.owed-no{color:var(--ok);font-weight:600}
+table.grid td.owed-unknown{color:var(--mut)}
+a{color:var(--acc)}
+form{margin:0}
+</style>
+<main>{{body}}</main>

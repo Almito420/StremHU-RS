@@ -1,0 +1,112 @@
+# Példa konfiguráció a stremhu-rs-hez.
+#
+# Nem kell létrehoznod: az első indításnál a program megírja magának ezt a fájlt az exe
+# mellé, alapértékekkel. Ez a példa arra jó, hogy lásd mi mindent lehet állítani, és hogy
+# egy másik gépen kézzel elő tudd készíteni.
+#
+# Ami üresen van hagyva, azt vagy a felületen adod meg (nCore fiók, TMDB kulcs), vagy a
+# program állítja elő magának az első indításkor (api_key, session_secret, password_hash).
+# A titkokat soha ne tedd verziókövetésbe.
+
+[server]
+listen_addr = "0.0.0.0"
+port = 3080
+
+[storage]
+state_path = "state.json"
+torrent_files_dir = "torrents"
+flush_interval_secs = 15
+resume_save_interval_secs = 60
+
+[streaming]
+chunk_size_bytes = 1048576
+piece_wait_timeout_secs = 120
+piece_poll_interval_ms = 400
+content_type = "video/x-matroska"
+
+[torrent]
+save_path = "downloads"
+save_path_secondary = ""
+listen_port = 6890
+global_connections_limit = 200
+connections_while_streaming = 50
+connections_while_idle = 20
+download_limit_bytes = 0
+upload_limit_bytes = 0
+enable_upnp_and_natpmp = false
+complete_extras_below_bytes = 536870912
+max_active_torrents = -1
+
+[pieces]
+readahead_bytes = 67108864
+head_deadline_ms = 0
+base_deadline_ms = 2000
+deadline_step_ms = 1000
+pin_file_edges = true
+idle_priority = 4
+
+[maintenance]
+hit_and_run = true
+keep_seed_seconds = 864000
+cache_retention_seconds = 1209600
+sweep_at = "20:00"
+watched_position_percent = 90
+watched_min_served_percent = 50
+require_watched = true
+partial_uses_local_seed_time = false
+enable_deletion = true
+warn_below_free_bytes = 1073741824
+warn_below_free_percent = 5
+notify_webhook_url = ""
+use_tracker_seed_rule = true
+seed_safety_margin_hours = 6
+partial_requires_ratio_one = false
+
+[ncore]
+username = "a nCore felhasznaloneved"
+password = "a nCore jelszavad"
+requires_full_download = false
+
+[filters]
+min_seeders = 1
+only_best_match = false
+resolution_order = [
+    "2160p",
+    "1080p",
+    "720p",
+]
+source_order = [
+    "remux",
+    "bluray",
+    "web-dl",
+]
+language_order = [
+    "hun",
+    "eng",
+]
+priority = [
+    "language",
+    "resolution",
+    "source",
+]
+
+[tmdb]
+api_key = "a sajat TMDB kulcsod"
+language = "hu-HU"
+
+[network]
+host_ip = ""
+enable_https = true
+https_port = 3443
+cert_domain = "local-ip.medicmobile.org"
+cert_provider_url = "https://local-ip.medicmobile.org/keys"
+cert_key_url = ""
+cert_cache_dir = "certs"
+cert_renew_margin_days = 21
+reverse_proxy_domain = ""
+
+[auth]
+username = "admin"
+password_hash = ""
+session_secret = ""
+api_key = ""
