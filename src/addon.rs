@@ -64,12 +64,23 @@ pub(crate) async fn stream_list(
         "search finished"
     );
 
-    let base = format!(
-        "http://{}:{}/{}",
-        host_for_display(&cfg),
-        cfg.server.port,
-        api_key
-    );
+    // Over HTTPS whenever the TLS listener is up, and this is not a nicety.
+    //
+    // Stremio in a browser is an HTTPS page, and a browser refuses to load plain HTTP media
+    // into one: the request is blocked as mixed content before it reaches us, and what the
+    // viewer sees is a stream that will not start, with no error that says why. The addon
+    // itself is installed over HTTPS, so handing out HTTP stream URLs from it was asking the
+    // browser to do the one thing it will not do. The native players on the desktop and the
+    // television have no such rule, which is why this went unnoticed while they were used.
+    let base = match state.https_host.read().await.clone() {
+        Some(host) => format!("https://{host}:{}/{}", cfg.network.https_port, api_key),
+        None => format!(
+            "http://{}:{}/{}",
+            host_for_display(&cfg),
+            cfg.server.port,
+            api_key
+        ),
+    };
 
     // What is already downloaded, so those rows can be marked. Choosing a copy that is
     // on the disk costs nothing; choosing a different one costs a second download and

@@ -172,6 +172,18 @@ pub async fn serve() -> Result<()> {
         .allow_origin(tower_http::cors::Any)
         .allow_methods([Method::GET, Method::HEAD, Method::OPTIONS])
         .allow_headers(tower_http::cors::Any)
+        // Chrome's private network access rule.
+        //
+        // Stremio in a browser is served from a public site, and this server answers on a
+        // private address. Chrome treats that combination as a step from a public network into a
+        // private one and refuses it unless the preflight says it is allowed, which it reports
+        // in the network tab as a plain CORS error however correct the other headers are. Seen
+        // exactly that way: our preflight answered 200 with the origin allowed, and every media
+        // request was still blocked.
+        //
+        // Only ever an answer to a request that already carries the browser's own preflight for
+        // this, and it grants nothing beyond reaching a server the viewer is running themselves.
+        .allow_private_network(true)
         // A player reads these to learn the size and whether it may seek.
         .expose_headers([
             header::CONTENT_RANGE,

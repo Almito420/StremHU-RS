@@ -770,7 +770,7 @@ pub(crate) async fn status(State(state): State<Arc<AppState>>) -> Response {
             &hash[..12.min(hash.len())],
             stats.download_rate as f64 / 1e6,
             stats.num_peers,
-            crate::webui::human_size(stats.total_done.max(0) as u64),
+            crate::webui::human_size(entry.downloaded_bytes().await),
             crate::webui::human_size(entry.file_len),
         ));
     }
@@ -791,9 +791,9 @@ pub(crate) async fn status(State(state): State<Arc<AppState>>) -> Response {
              down {:.1} MB/s up {:.1} MB/s, {} peers\n",
             &hash[..12.min(hash.len())],
             entry.file_name,
-            crate::webui::human_size(stats.total_done.max(0) as u64),
+            crate::webui::human_size(entry.downloaded_bytes().await),
             crate::webui::human_size(entry.file_len),
-            crate::webui::human_size(front as u64 * entry.piece_len),
+            crate::webui::human_size((front as u64 * entry.piece_len).min(entry.file_len)),
             stats.download_rate as f64 / 1e6,
             stats.upload_rate as f64 / 1e6,
             stats.num_peers,

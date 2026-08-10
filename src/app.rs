@@ -469,11 +469,13 @@ pub(crate) fn spawn_watchdog(state: Arc<AppState>) {
     // Every half minute, and a problem has to hold for ten of those before it is mentioned.
     const INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
     const NEEDED: usize = 10;
-    // Two thirds of one core, and two gigabytes. Both are far above what this server does when
-    // it is working properly: idle it is a fraction of a percent and under thirty megabytes,
-    // and even writing at seventeen megabytes a second it settles back within a minute.
+    // Two thirds of one core, and one gigabyte of privately held memory. Measured on this
+    // machine: idle is a fraction of a percent and under thirty megabytes, and downloading four
+    // episodes at once while writing twenty-four gigabytes came to seventy-one megabytes. A
+    // gigabyte is therefore more than an order of magnitude clear of normal working, which is
+    // where a threshold for "something is wrong" belongs.
     const CPU_LIMIT: f64 = 0.66;
-    const RSS_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
+    const RSS_LIMIT: u64 = 1024 * 1024 * 1024;
 
     tokio::spawn(async move {
         let mut samples: Vec<(f64, u64)> = Vec::new();

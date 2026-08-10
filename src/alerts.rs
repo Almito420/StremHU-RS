@@ -92,7 +92,7 @@ impl<S: tracing::Subscriber> Layer<S> for ErrorLayer {
 }
 
 /// What this process is using right now: processor time as a fraction of one core since the
-/// last look, and resident memory in bytes.
+/// last look, and the memory it privately holds, in bytes.
 ///
 /// Straight out of the Windows API. Two calls, no dependency.
 #[cfg(windows)]
@@ -158,11 +158,18 @@ pub fn usage(previous_cpu: u64, elapsed: std::time::Duration) -> (f64, u64, u64)
         cb: std::mem::size_of::<MemoryCounters>() as u32,
         ..Default::default()
     };
+    // Private commit, not the working set.
+    //
+    // Measured on this machine while it was writing: working set 1808 MB, private 71 MB. The
+    // difference is memory-mapped file pages, which is how libtorrent 2.0 writes to disk;
+    // Windows counts them in the working set but they are reclaimable cache, not memory the
+    // process holds. Watching the working set would have raised an alarm about a server that
+    // was working perfectly, and it would have missed a real leak behind the same number.
     let rss = if unsafe {
         K32GetProcessMemoryInfo(process, &mut counters, counters.cb)
     } != 0
     {
-        counters.working_set_size as u64
+        counters.pagefile_usage as u64
     } else {
         0
     };

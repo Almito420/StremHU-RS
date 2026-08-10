@@ -89,6 +89,7 @@ unsafe extern "C" {
     fn lts_prioritize_all_pieces(t: *mut RawTorrent, priority: i32) -> i32;
     fn lts_set_file_priority(t: *mut RawTorrent, index: i32, priority: i32) -> i32;
     fn lts_force_recheck(t: *mut RawTorrent) -> i32;
+    fn lts_force_reannounce(t: *mut RawTorrent) -> i32;
     fn lts_torrent_info_parse(
         data: *const u8,
         len: usize,
@@ -444,6 +445,20 @@ impl Torrent {
 
     /// The reason this whole layer exists. `deadline_ms` is relative to now and
     /// lower means more urgent.
+    /// Tells the tracker now that what this torrent wants has changed.
+    ///
+    /// Needed whenever a file is switched on or off in a torrent that was already running. A
+    /// torrent with everything it wanted announces as a seeder, and a seeder is given no peers;
+    /// without this, a newly selected file waits for the next scheduled announce with nobody to
+    /// download from.
+    pub fn force_reannounce(&self) -> Result<()> {
+        let rc = unsafe { lts_force_reannounce(self.raw) };
+        if rc != 0 {
+            bail!("force_reannounce: {}", last_error());
+        }
+        Ok(())
+    }
+
     /// Re-reads the files from disk and rebuilds what the torrent has.
     ///
     /// Used after deleting one file of a torrent whose other files stay: without it libtorrent

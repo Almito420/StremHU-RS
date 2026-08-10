@@ -209,6 +209,33 @@ impl Entry {
         have[first..=last].iter().all(|b| *b == 1)
     }
 
+    /// How much of *this file* is on disk.
+    ///
+    /// Counted from the piece map rather than taken from the torrent's own figure, because that
+    /// one is the torrent's: with four episodes taken from one pack, every episode reported the
+    /// pack's twenty-nine gigabytes against its own seven. The pieces at the file's edges are
+    /// shared with its neighbours, so only the part that overlaps this file is counted.
+    pub async fn downloaded_bytes(&self) -> u64 {
+        let have = self.have.read().await;
+        let piece = self.piece_len.max(1);
+        let start = self.file_offset;
+        let end = start + self.file_len;
+        let mut total = 0u64;
+        for index in self.span.first_piece..=self.span.last_piece {
+            if have.get(index as usize).copied().unwrap_or(0) != 1 {
+                continue;
+            }
+            let piece_start = index as u64 * piece;
+            let piece_end = piece_start + piece;
+            let from = piece_start.max(start);
+            let to = piece_end.min(end);
+            if to > from {
+                total += to - from;
+            }
+        }
+        total.min(self.file_len)
+    }
+
     pub async fn contiguous_front(&self) -> u32 {
         let have = self.have.read().await;
         engine::contiguous_from(&have, self.span.first_piece)
@@ -564,6 +591,11 @@ impl Library {
                 }
             }
         }
+        // What is wanted shrank, and with the rest complete this torrent is a seeder again.
+        // Saying so promptly is what keeps its seeding time counting.
+        if let Err(e) = entry.torrent.force_reannounce() {
+            tracing::debug!(key, error = %e, "could not re-announce");
+        }
         tracing::info!(
             key,
             remaining = others,
@@ -667,10 +699,17 @@ impl Library {
             // Another episode of the same pack is already being served. Only this file is
             // added; nothing else is touched.
             torrent.set_file_priority(selected, 7)?;
+            // And say so to the tracker at once. Everything this torrent wanted was already on
+            // disk, so it has been announcing itself as a seeder, and a seeder is handed no
+            // peers: without this the new file would sit at zero bytes until the next scheduled
+            // announce, half an hour later.
+            if let Err(e) = torrent.force_reannounce() {
+                tracing::warn!(hash = %hash, error = %e, "could not re-announce");
+            }
             tracing::info!(
                 hash = %hash,
                 already = siblings.len(),
-                "another file of this torrent is now served as well"
+                "another file of this torrent is now served as well, tracker told"
             );
         }
         torrent.set_max_connections(cfg.torrent.connections_while_idle)?;
@@ -839,6 +878,10 @@ async fn deadline_loop(lib: Arc<Library>) {
                         }
                     }
                     if !failed {
+                        // The wanted set grew, so the tracker has to hear about it.
+                        if let Err(e) = entry.torrent.force_reannounce() {
+                            tracing::debug!(error = %e, "could not re-announce");
+                        }
                         tracing::info!(
                             key = %key,
                             files = extras.len(),

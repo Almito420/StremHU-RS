@@ -240,6 +240,34 @@ pub(crate) fn save_torrent_file(cfg: &Config, info_hash: &str, bytes: &[u8]) -> 
     }
 }
 
+/// The content type for a file, from its name.
+///
+/// It used to be one configured value for everything, which said Matroska whatever was being
+/// served. Most releases here are `.mkv` so it was right most of the time, and wrong in the way
+/// that is hardest to diagnose: an older pack whose episodes are `.avi` was announced as
+/// Matroska, and a player that believes the label and then finds `RIFF` gives up without
+/// explaining itself. Measured on a real pack from this tracker, so this is not hypothetical.
+///
+/// The configured value stays as the answer for anything unrecognised.
+pub(crate) fn content_type_for(file_name: &str, fallback: &str) -> String {
+    let extension = file_name
+        .rsplit_once('.')
+        .map(|(_, ext)| ext.to_ascii_lowercase())
+        .unwrap_or_default();
+    match extension.as_str() {
+        "mkv" => "video/x-matroska",
+        "mp4" | "m4v" | "mov" => "video/mp4",
+        "avi" => "video/x-msvideo",
+        "webm" => "video/webm",
+        "ts" | "m2ts" | "mts" => "video/mp2t",
+        "wmv" => "video/x-ms-wmv",
+        "flv" => "video/x-flv",
+        "mpg" | "mpeg" => "video/mpeg",
+        _ => fallback,
+    }
+    .to_string()
+}
+
 pub(crate) fn range_response(
     state: Arc<AppState>,
     entry: Arc<Entry>,
@@ -277,7 +305,10 @@ pub(crate) fn range_response(
             StatusCode::OK
         })
         .header(header::ACCEPT_RANGES, "bytes")
-        .header(header::CONTENT_TYPE, cfg.streaming.content_type.clone())
+        .header(
+            header::CONTENT_TYPE,
+            content_type_for(&entry.file_name, &cfg.streaming.content_type),
+        )
         .header(header::CONTENT_LENGTH, length);
 
     if range.is_some() {
@@ -430,5 +461,25 @@ pub(crate) async fn wait_for(
             );
         }
         tokio::time::sleep(poll).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The case this was written for: a pack from this tracker whose episodes are `.avi`, served
+    /// with a Matroska label. The bytes began with `RIFF` and the player gave up silently.
+    #[test]
+    fn the_content_type_follows_the_file() {
+        let fallback = "video/x-matroska";
+        assert_eq!(content_type_for("House.S01E06.avi", fallback), "video/x-msvideo");
+        assert_eq!(content_type_for("film.mkv", fallback), "video/x-matroska");
+        assert_eq!(content_type_for("film.MKV", fallback), "video/x-matroska");
+        assert_eq!(content_type_for("film.mp4", fallback), "video/mp4");
+        assert_eq!(content_type_for("recording.ts", fallback), "video/mp2t");
+        // Anything unrecognised keeps the configured answer rather than guessing.
+        assert_eq!(content_type_for("film.xyz", fallback), fallback);
+        assert_eq!(content_type_for("no-extension", fallback), fallback);
     }
 }

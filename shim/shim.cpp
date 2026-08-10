@@ -568,6 +568,29 @@ LTS_API int lts_set_file_priority(Torrent* t, int index, int priority)
 	}
 }
 
+// Tells the tracker straight away that what we want has changed.
+//
+// This matters more than it sounds. A torrent whose every selected file is complete announces
+// itself with nothing left to fetch, so the tracker treats it as a seeder: it hands back no
+// peers, and other seeders will not connect to a seeder. Selecting one more file out of that
+// same torrent means we suddenly do want data, but the tracker will not learn that until the
+// next scheduled announce, thirty to forty minutes later. Until then the download sits at zero
+// bytes with nobody to ask, which is exactly what a viewer sees as "it will not start".
+LTS_API int lts_force_reannounce(Torrent* t)
+{
+	if (t == nullptr) return -1;
+	try
+	{
+		t->handle.force_reannounce();
+		return 0;
+	}
+	catch (std::exception const& e)
+	{
+		set_error(std::string("force_reannounce: ") + e.what());
+		return -1;
+	}
+}
+
 // Re-reads the torrent's files from disk and rebuilds what it has.
 //
 // Needed when one file of a torrent is deleted while the others stay. Setting the file's
