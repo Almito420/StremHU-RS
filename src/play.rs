@@ -144,7 +144,9 @@ pub(crate) async fn play(
         if let Err(e) = crate::disk::space_at_least(&existing, needed) {
             let message = format!("Nincs hely a torrent saját mappájában: {e}");
             tracing::error!("{message}");
-            state.notify_occasionally("no-room-existing", &message).await;
+            if cfg.maintenance.notify_disk {
+                state.notify_occasionally("no-room-existing", &message).await;
+            }
             return (StatusCode::INSUFFICIENT_STORAGE, format!("{message}
 ")).into_response();
         }
@@ -165,7 +167,9 @@ pub(crate) async fn play(
                     "Az elsődleges lemez megtelt, a letöltés a másodlagosra megy: {dir}"
                 );
                 tracing::warn!("{message}");
-                state.notify_occasionally("secondary", &message).await;
+                if cfg.maintenance.notify_disk {
+                    state.notify_occasionally("secondary", &message).await;
+                }
             }
             dir
         }
@@ -173,7 +177,9 @@ pub(crate) async fn play(
             let message = format!("Nincs hely a letöltéshez: {e}");
             tracing::error!("{message}");
             // A player retries a refused stream several times, and each retry is not news.
-            state.notify_occasionally("no-room", &message).await;
+            if cfg.maintenance.notify_disk {
+                state.notify_occasionally("no-room", &message).await;
+            }
             return (StatusCode::INSUFFICIENT_STORAGE, format!("{message}
 ")).into_response();
         }

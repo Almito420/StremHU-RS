@@ -582,6 +582,11 @@ pub struct RetentionView {
     pub hit_and_run: bool,
     pub require_watched: bool,
     pub enable_deletion: bool,
+    pub sweep_on_start: bool,
+    pub space_saving: bool,
+    pub notify_sweep: bool,
+    pub notify_disk: bool,
+    pub notify_problems: bool,
     /// When the sweep will next happen, in words.
     pub next_run: String,
     /// Where a low-space warning is sent, empty for nowhere.
@@ -607,6 +612,11 @@ impl RetentionView {
             hit_and_run: m.hit_and_run,
             require_watched: m.require_watched,
             enable_deletion: m.enable_deletion,
+            sweep_on_start: m.sweep_on_start,
+            space_saving: m.space_saving,
+            notify_sweep: m.notify_sweep,
+            notify_disk: m.notify_disk,
+            notify_problems: m.notify_problems,
             next_run: crate::maintenance::next_run_label(m, last_sweep_date),
             notify_webhook_url: m.notify_webhook_url.clone(),
         }
@@ -628,6 +638,11 @@ impl RetentionView {
             .replace("{{hit_and_run}}", checked(self.hit_and_run))
             .replace("{{require_watched}}", checked(self.require_watched))
             .replace("{{enable_deletion}}", checked(self.enable_deletion))
+            .replace("{{sweep_on_start}}", checked(self.sweep_on_start))
+            .replace("{{space_saving}}", checked(self.space_saving))
+            .replace("{{notify_sweep}}", checked(self.notify_sweep))
+            .replace("{{notify_disk}}", checked(self.notify_disk))
+            .replace("{{notify_problems}}", checked(self.notify_problems))
             .replace("{{next_run}}", &html_escape(&self.next_run))
             .replace(
                 "{{notify_webhook_url}}",
@@ -1171,6 +1186,11 @@ mod tests {
             "hit_and_run",
             "require_watched",
             "enable_deletion",
+            "sweep_on_start",
+            "space_saving",
+            "notify_sweep",
+            "notify_disk",
+            "notify_problems",
             // save-engine
             "max_active_torrents",
             "complete_extras_below_mb",

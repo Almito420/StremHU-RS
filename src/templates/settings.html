@@ -55,7 +55,7 @@
   <h2>Mit tart meg a szerver</h2>
   <div class="row">
     <div>
-      <label for="ks">Seedelés legalább (nap)</label>
+      <label for="ks">Tartalék: ennyit seedel, ha a trackertől nincs adat (nap)</label>
       <input id="ks" name="keep_seed_days" type="number" min="1" value="{{keep_seed_days}}">
     </div>
     <div>
@@ -92,6 +92,24 @@
     Csak olyat töröljön, amit legalább egyszer lejátszottunk</label>
   <label class="check"><input type="checkbox" name="enable_deletion"{{enable_deletion}}>
     Automatikus törlés. Kikapcsolva soha semmi nem törlődik magától</label>
+  <label class="check"><input type="checkbox" name="sweep_on_start"{{sweep_on_start}}>
+    Induláskor is fusson egy kör, ne csak a megadott időben</label>
+  <label class="check"><input type="checkbox" name="space_saving"{{space_saving}}>
+    Helytakarékos mód: egy megnézett fájl azonnal törölhető, csak az marad meg, amivel a
+    torrent tovább tud seedelni</label>
+  <p class="note">A helytakarékos mód egy sorozatcsomagnál nyolc rész helyett egyet hagy a
+    lemezen. Egy filmnél nem változtat semmit, mert ott az az egy fájl a fizetőeszköz, és az a
+    teljes tartozás letörlesztéséig marad. Amit vállalsz vele: a kitörölt fájlból nem tudsz
+    feltölteni, tehát a tartozás tisztán idővel fogy, aránnyal nem.</p>
+  <h2>Miről jöjjön értesítés</h2>
+  <label class="check"><input type="checkbox" name="notify_sweep"{{notify_sweep}}>
+    A törlési körökről, akkor is ha nem törölt semmit</label>
+  <label class="check"><input type="checkbox" name="notify_disk"{{notify_disk}}>
+    Lemezről: kevés a hely, átcsúszás a másodlagosra, nincs hely a letöltéshez</label>
+  <label class="check"><input type="checkbox" name="notify_problems"{{notify_problems}}>
+    Hibákról és kirívó erőforrás-használatról</label>
+  <p class="note">Ami ki van kapcsolva, az a naplóba és a felületre így is odakerül, csak
+    push nem megy róla.</p>
   <label for="nw">Értesítés ide, ha kifogy a hely (ntfy vagy Discord webhook)</label>
   <input id="nw" name="notify_webhook_url" value="{{notify_webhook_url}}"
          placeholder="https://ntfy.sh/valami-titkos-nev">

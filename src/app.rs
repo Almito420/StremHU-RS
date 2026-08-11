@@ -320,7 +320,7 @@ impl AppState {
         // it drops after recovering. This check runs whenever a download starts, and a
         // warning that arrives on every film stops being read; one that never arrives until
         // tomorrow evening is no warning at all.
-        if report.low {
+        if report.low && cfg.maintenance.notify_disk {
             self.notify_occasionally("low-space", &report.summary).await;
         } else {
             // Recovered, so the next time it drops is news again.
@@ -478,6 +478,9 @@ pub(crate) fn spawn_problem_reporter(
 ) {
     tokio::spawn(async move {
         while let Some(problem) = problems.recv().await {
+            if !state.config().await.maintenance.notify_problems {
+                continue;
+            }
             let kind = format!("error:{}", problem.kind);
             state
                 .notify_occasionally(&kind, &format!("Hiba: {}", problem.text))
@@ -521,7 +524,9 @@ pub(crate) fn spawn_watchdog(state: Arc<AppState>) {
                 crate::alerts::sustained_problem(&samples, CPU_LIMIT, RSS_LIMIT, NEEDED)
             {
                 tracing::warn!("{text}");
-                state.notify_occasionally("watchdog", &text).await;
+                if state.config().await.maintenance.notify_problems {
+                    state.notify_occasionally("watchdog", &text).await;
+                }
                 // Start again, so the next message is about a new run rather than the same one.
                 samples.clear();
             }

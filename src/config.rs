@@ -367,6 +367,21 @@ pub struct Maintenance {
     /// tracker's behaviour rather than on its published rules. Turning it on is the cautious
     /// reading: nothing is deleted from a pack until as much has been given back as was taken.
     pub partial_requires_ratio_one: bool,
+    /// Keep only what is needed to go on seeding, and delete the rest as soon as it is watched.
+    ///
+    /// Off by default, because the ordinary rule is kinder to the swarm: a file that has served
+    /// its own share stays until it has, and until then it can be uploaded from. With this on, a
+    /// watched file goes at once and the torrent carries on paying its debt with the one file
+    /// that is left. On a season pack that is the difference between eight episodes on the disk
+    /// and one. A film's torrent has only the one file, so this changes nothing there: it is
+    /// still kept until the torrent's whole obligation is settled.
+    pub space_saving: bool,
+    /// Run a deletion round shortly after starting, not only at the appointed time.
+    pub sweep_on_start: bool,
+    /// Which events are worth a push. Everything is in the log and the interface regardless.
+    pub notify_sweep: bool,
+    pub notify_disk: bool,
+    pub notify_problems: bool,
 }
 
 impl Default for Maintenance {
@@ -390,6 +405,11 @@ impl Default for Maintenance {
             use_tracker_seed_rule: true,
             seed_safety_margin_hours: 6,
             partial_requires_ratio_one: false,
+            space_saving: false,
+            sweep_on_start: true,
+            notify_sweep: true,
+            notify_disk: true,
+            notify_problems: true,
         }
     }
 }
@@ -460,6 +480,26 @@ pub fn file_seed_time_still_owed(
     required.saturating_sub(file_seeded_secs)
 }
 
+/// Whether a reason for keeping something is about seeding, as opposed to about the file itself.
+///
+/// Used only to word the summary: "nine torrents still to seed" is a different sentence from
+/// "two files you have not watched", and lumping them together was what made the message
+/// unreadable. Listed rather than derived, and the test below names every reason `verdict` can
+/// give, so one added later shows up as a test failure instead of a quietly wrong count.
+pub fn is_about_seeding(reason: &str) -> bool {
+    matches!(
+        reason,
+        "a tracker szerint még seedelni kell"
+            | "a trackertől még nincs adat erről a torrentről"
+            | "még nem osztottuk vissza a letöltött mennyiséget"
+            | "a seedelési idő még nem telt le"
+            | "a ráhagyás ideje még nem telt le"
+            | "még nem seedeltünk eleget"
+            | "még nem seedeltünk eleget ezzel a fájllal"
+            | "ennek a fájlnak még hátravan a seedelése"
+    )
+}
+
 /// What the sweep knows about one download when deciding its fate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Candidate {
@@ -508,7 +548,20 @@ pub struct Candidate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     Delete,
-    Keep(&'static str),
+    Keep(Scope, &'static str),
+}
+
+/// Whether a reason is about this one file or about the whole torrent.
+///
+/// Carried in the verdict rather than worked out from the wording afterwards, so a reason added
+/// later cannot quietly land in the wrong bucket. It matters when counting: "nine still owe
+/// seeding" reads as nine downloads, when it is nine files across five torrents and it is the
+/// torrents that owe. The seeding obligation is the torrent's; being watched, being kept and
+/// having served its own share are the file's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    Torrent,
+    File,
 }
 
 impl Maintenance {
@@ -517,18 +570,18 @@ impl Maintenance {
     /// Ordered so the most protective rule answers first, and every rule can veto.
     pub fn verdict(&self, c: &Candidate) -> Verdict {
         if !self.enable_deletion {
-            return Verdict::Keep("az automatikus törlés ki van kapcsolva");
+            return Verdict::Keep(Scope::File, "az automatikus törlés ki van kapcsolva");
         }
         // Never touch something a player is reading, whatever the clock says. The
         // sweep runs in the evening, which is exactly when someone is watching.
         if c.streaming {
-            return Verdict::Keep("épp játszik");
+            return Verdict::Keep(Scope::Torrent, "épp játszik");
         }
         if c.kept {
-            return Verdict::Keep("megtartásra jelölve");
+            return Verdict::Keep(Scope::File, "megtartásra jelölve");
         }
         if self.require_watched && !c.watched {
-            return Verdict::Keep("még nem néztük meg");
+            return Verdict::Keep(Scope::File, "még nem néztük meg");
         }
         // The tracker's own answer outranks our arithmetic, in both directions.
         //
@@ -545,6 +598,11 @@ impl Maintenance {
             // Not the file holding the torrent open, so the tracker's list is not this file's
             // business: whatever is still owed goes on being paid by what stays behind. What
             // this file has to have done is its own share.
+            // In space saving mode a watched file goes at once: what pays the torrent's debt is
+            // the file that stays behind, and the rules above have already made sure one does.
+            if self.space_saving {
+                return Verdict::Delete;
+            }
             let owed = file_seed_time_still_owed(
                 c.file_bytes,
                 c.tracker_downloaded,
@@ -555,10 +613,10 @@ impl Maintenance {
                 // Without the tracker's figures the share cannot be worked out, so the flat
                 // setting stands in.
                 if c.file_seeded_secs < self.keep_seed_seconds {
-                    return Verdict::Keep("még nem seedeltünk eleget ezzel a fájllal");
+                    return Verdict::Keep(Scope::File, "még nem seedeltünk eleget ezzel a fájllal");
                 }
             } else if owed > 0 {
-                return Verdict::Keep("ennek a fájlnak még hátravan a seedelése");
+                return Verdict::Keep(Scope::File, "ennek a fájlnak még hátravan a seedelése");
             }
             return Verdict::Delete;
         }
@@ -567,7 +625,7 @@ impl Maintenance {
             // this becomes a hit and run, so being on it is the end of the discussion.
             let trust_tracker = !(c.partial && self.partial_uses_local_seed_time);
             if c.owed_to_tracker && trust_tracker {
-                return Verdict::Keep("a tracker szerint még seedelni kell");
+                return Verdict::Keep(Scope::Torrent, "a tracker szerint még seedelni kell");
             }
 
             // A pack we hold one episode of: by the published definition of Status it is a
@@ -580,10 +638,10 @@ impl Maintenance {
                 // Explicitly allowed to fall back on time instead.
             } else if c.partial {
                 if !c.figures_known {
-                    return Verdict::Keep("a trackertől még nincs adat erről a torrentről");
+                    return Verdict::Keep(Scope::Torrent, "a trackertől még nincs adat erről a torrentről");
                 }
                 if c.tracker_uploaded < c.tracker_downloaded {
-                    return Verdict::Keep("még nem osztottuk vissza a letöltött mennyiséget");
+                    return Verdict::Keep(Scope::Torrent, "még nem osztottuk vissza a letöltött mennyiséget");
                 }
             }
 
@@ -596,15 +654,15 @@ impl Maintenance {
                     c.seeded_secs,
                 );
                 if owed > 0 {
-                    return Verdict::Keep("a seedelési idő még nem telt le");
+                    return Verdict::Keep(Scope::Torrent, "a seedelési idő még nem telt le");
                 }
                 if c.seeded_secs < self.seed_safety_margin_hours * 3600 {
-                    return Verdict::Keep("a ráhagyás ideje még nem telt le");
+                    return Verdict::Keep(Scope::Torrent, "a ráhagyás ideje még nem telt le");
                 }
             } else if c.seeded_secs < self.keep_seed_seconds {
                 // No figures, so the flat setting decides. Deliberately the cautious branch:
                 // without the tracker's numbers there is no way to work out what is owed.
-                return Verdict::Keep("még nem seedeltünk eleget");
+                return Verdict::Keep(Scope::Torrent, "még nem seedeltünk eleget");
             }
         }
         Verdict::Delete
@@ -1026,6 +1084,80 @@ mod tests {
         }
     }
 
+    /// Space saving mode: a watched file goes at once, and what pays the torrent's debt is the
+    /// file that stays. On a pack that is one episode on the disk instead of eight.
+    #[test]
+    fn space_saving_releases_a_watched_file_at_once() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let saving = || Maintenance {
+            enable_deletion: true,
+            space_saving: true,
+            ..Maintenance::default()
+        };
+        // An episode of a pack, watched, finished an hour ago, and the pack still owes seeding.
+        let fresh = Candidate {
+            is_keeper: false,
+            partial: true,
+            figures_known: true,
+            tracker_downloaded: 15 * GIB,
+            tracker_uploaded: 0,
+            file_bytes: 7 * GIB,
+            file_seeded_secs: 3600,
+            seeded_secs: 3600,
+            owed_to_tracker: true,
+            ..ripe()
+        };
+        assert_eq!(saving().verdict(&fresh), Verdict::Delete);
+        // Without the mode it waits for its own share.
+        assert_eq!(
+            deleting().verdict(&fresh),
+            Verdict::Keep(Scope::File, "ennek a fájlnak még hátravan a seedelése")
+        );
+
+        // The file holding the torrent open is not touched, whatever the mode says: that is what
+        // keeps the debt being paid.
+        let keeper = Candidate { is_keeper: true, ..fresh };
+        assert_eq!(
+            saving().verdict(&keeper),
+            Verdict::Keep(Scope::Torrent, "a tracker szerint még seedelni kell")
+        );
+        // And an unwatched file is still not deleted by it.
+        let unwatched = Candidate { watched: false, ..fresh };
+        assert_eq!(
+            saving().verdict(&unwatched),
+            Verdict::Keep(Scope::File, "még nem néztük meg")
+        );
+    }
+
+    /// Every reason `verdict` can give is classified as being about seeding or not, because the
+    /// summary counts the two differently. Listed here so a new reason shows up as a failure.
+    #[test]
+    fn every_reason_is_classified() {
+        let seeding = [
+            "a tracker szerint még seedelni kell",
+            "a trackertől még nincs adat erről a torrentről",
+            "még nem osztottuk vissza a letöltött mennyiséget",
+            "a seedelési idő még nem telt le",
+            "a ráhagyás ideje még nem telt le",
+            "még nem seedeltünk eleget",
+            "még nem seedeltünk eleget ezzel a fájllal",
+            "ennek a fájlnak még hátravan a seedelése",
+        ];
+        let not_seeding = [
+            "az automatikus törlés ki van kapcsolva",
+            "épp játszik",
+            "megtartásra jelölve",
+            "még nem néztük meg",
+            "a törlés nem sikerült",
+        ];
+        for r in seeding {
+            assert!(is_about_seeding(r), "{r}");
+        }
+        for r in not_seeding {
+            assert!(!is_about_seeding(r), "{r}");
+        }
+    }
+
     /// A tracker that has never heard of a torrent is not a tracker saying the debt is paid.
     ///
     /// The numbers are from the real case: four episodes taken from a pack forty minutes
@@ -1048,7 +1180,7 @@ mod tests {
         };
         assert_eq!(
             deleting().verdict(&fresh),
-            Verdict::Keep("még nem seedeltünk eleget"),
+            Verdict::Keep(Scope::Torrent, "még nem seedeltünk eleget"),
             "with nothing known, the flat setting is what protects it"
         );
 
@@ -1059,7 +1191,7 @@ mod tests {
         };
         assert_eq!(
             deleting().verdict(&sibling),
-            Verdict::Keep("még nem seedeltünk eleget ezzel a fájllal")
+            Verdict::Keep(Scope::File, "még nem seedeltünk eleget ezzel a fájllal")
         );
     }
 
@@ -1086,7 +1218,7 @@ mod tests {
         );
         assert_eq!(
             deleting().verdict(&watched_and_seeded),
-            Verdict::Keep("a seedelési idő még nem telt le"),
+            Verdict::Keep(Scope::Torrent, "a seedelési idő még nem telt le"),
             "without an answer from the tracker the arithmetic is all there is"
         );
 
@@ -1100,15 +1232,15 @@ mod tests {
         // A clear answer does not override the things that are not about seeding.
         assert_eq!(
             deleting().verdict(&Candidate { watched: false, ..answered }),
-            Verdict::Keep("még nem néztük meg")
+            Verdict::Keep(Scope::File, "még nem néztük meg")
         );
         assert_eq!(
             deleting().verdict(&Candidate { kept: true, ..answered }),
-            Verdict::Keep("megtartásra jelölve")
+            Verdict::Keep(Scope::File, "megtartásra jelölve")
         );
         assert_eq!(
             deleting().verdict(&Candidate { streaming: true, ..answered }),
-            Verdict::Keep("épp játszik")
+            Verdict::Keep(Scope::Torrent, "épp játszik")
         );
     }
 
@@ -1152,7 +1284,7 @@ mod tests {
         };
         assert_eq!(
             deleting().verdict(&early),
-            Verdict::Keep("ennek a fájlnak még hátravan a seedelése")
+            Verdict::Keep(Scope::File, "ennek a fájlnak még hátravan a seedelése")
         );
 
         // The keeper, with the same numbers, answers for the whole torrent instead, and the
@@ -1164,7 +1296,7 @@ mod tests {
         };
         assert_eq!(
             deleting().verdict(&keeper),
-            Verdict::Keep("a tracker szerint még seedelni kell"),
+            Verdict::Keep(Scope::Torrent, "a tracker szerint még seedelni kell"),
             "the last file is never taken while the torrent still owes"
         );
     }
@@ -1230,7 +1362,7 @@ mod tests {
         };
         assert_eq!(
             deleting().verdict(&c),
-            Verdict::Keep("a seedelési idő még nem telt le")
+            Verdict::Keep(Scope::Torrent, "a seedelési idő még nem telt le")
         );
 
         // Past the requirement and past the margin: deletable.
@@ -1251,7 +1383,7 @@ mod tests {
         };
         assert_eq!(
             deleting().verdict(&fresh),
-            Verdict::Keep("a ráhagyás ideje még nem telt le")
+            Verdict::Keep(Scope::Torrent, "a ráhagyás ideje még nem telt le")
         );
     }
 
@@ -1277,7 +1409,7 @@ mod tests {
         };
         assert_eq!(
             deleting().verdict(&young),
-            Verdict::Keep("a seedelési idő még nem telt le")
+            Verdict::Keep(Scope::Torrent, "a seedelési idő még nem telt le")
         );
     }
 
@@ -1304,7 +1436,7 @@ mod tests {
         };
         assert_eq!(
             deleting().verdict(&c),
-            Verdict::Keep("még nem osztottuk vissza a letöltött mennyiséget"),
+            Verdict::Keep(Scope::Torrent, "még nem osztottuk vissza a letöltött mennyiséget"),
             "no amount of time settles a partial torrent's debt"
         );
 
@@ -1322,7 +1454,7 @@ mod tests {
         };
         assert_eq!(
             deleting().verdict(&unknown),
-            Verdict::Keep("a trackertől még nincs adat erről a torrentről")
+            Verdict::Keep(Scope::Torrent, "a trackertől még nincs adat erről a torrentről")
         );
     }
 
@@ -1339,7 +1471,7 @@ mod tests {
             seeded_secs: 400 * 24 * 3600,
             ..ripe()
         };
-        assert_eq!(deleting().verdict(&c), Verdict::Keep("még nem néztük meg"));
+        assert_eq!(deleting().verdict(&c), Verdict::Keep(Scope::File, "még nem néztük meg"));
     }
 
     /// The tracker's own answer outranks every local clock: this is what protects the
@@ -1353,7 +1485,7 @@ mod tests {
         };
         assert_eq!(
             deleting().verdict(&c),
-            Verdict::Keep("a tracker szerint még seedelni kell")
+            Verdict::Keep(Scope::Torrent, "a tracker szerint még seedelni kell")
         );
     }
 
@@ -1369,7 +1501,7 @@ mod tests {
         };
         assert_eq!(
             deleting().verdict(&c),
-            Verdict::Keep("még nem seedeltünk eleget")
+            Verdict::Keep(Scope::Torrent, "még nem seedeltünk eleget")
         );
 
         // Past it, and the retention window too, it can go.
@@ -1399,7 +1531,7 @@ mod tests {
     #[test]
     fn a_kept_item_survives_everything() {
         let c = Candidate { kept: true, ..ripe() };
-        assert_eq!(deleting().verdict(&c), Verdict::Keep("megtartásra jelölve"));
+        assert_eq!(deleting().verdict(&c), Verdict::Keep(Scope::File, "megtartásra jelölve"));
     }
 
     /// The sweep runs in the evening, which is when someone is watching.
@@ -1412,7 +1544,7 @@ mod tests {
         };
         assert_eq!(
             deleting().verdict(&c),
-            Verdict::Keep("épp játszik")
+            Verdict::Keep(Scope::Torrent, "épp játszik")
         );
     }
 
@@ -1421,7 +1553,7 @@ mod tests {
         let m = Maintenance::default(); // enable_deletion is false
         assert_eq!(
             m.verdict(&ripe()),
-            Verdict::Keep("az automatikus törlés ki van kapcsolva")
+            Verdict::Keep(Scope::File, "az automatikus törlés ki van kapcsolva")
         );
     }
 
@@ -1439,7 +1571,7 @@ mod tests {
         // measuring this tracker showed that it does work.
         assert_eq!(
             deleting().verdict(&stuck),
-            Verdict::Keep("a tracker szerint még seedelni kell")
+            Verdict::Keep(Scope::Torrent, "a tracker szerint még seedelni kell")
         );
 
         let m = Maintenance {
@@ -1456,7 +1588,7 @@ mod tests {
         };
         assert_eq!(
             m.verdict(&complete),
-            Verdict::Keep("a tracker szerint még seedelni kell")
+            Verdict::Keep(Scope::Torrent, "a tracker szerint még seedelni kell")
         );
 
         // With the tracker's formula switched off, the flat setting is what has to be served,
@@ -1471,7 +1603,7 @@ mod tests {
         };
         assert_eq!(
             flat.verdict(&young),
-            Verdict::Keep("még nem seedeltünk eleget")
+            Verdict::Keep(Scope::Torrent, "még nem seedeltünk eleget")
         );
     }
 
@@ -1491,7 +1623,7 @@ mod tests {
         assert_eq!(m.verdict(&c), Verdict::Delete);
         assert_eq!(
             m.verdict(&Candidate { watched: false, ..c }),
-            Verdict::Keep("még nem néztük meg")
+            Verdict::Keep(Scope::File, "még nem néztük meg")
         );
     }
 

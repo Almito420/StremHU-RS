@@ -29,50 +29,72 @@ pub struct Report {
     /// How much the deletions freed, so the message can say it without measuring the disks.
     pub freed_bytes: u64,
     /// Why each surviving item survived, so "why is this still here" is answerable.
-    pub kept: Vec<(String, &'static str)>,
+    ///
+    /// Title, the torrent it belongs to, the scope of the reason, and the reason.
+    pub kept: Vec<(String, String, crate::config::Scope, &'static str)>,
+    /// Paths the deletions removed, so the disks can be measured once they are really gone.
+    pub deleted_paths: Vec<String>,
     /// Set when the run was abandoned instead of performed.
     pub abandoned: Option<String>,
 }
 
 impl Report {
+    /// What is still being seeded, and anything held back for a different reason.
+    ///
+    /// Two sentences rather than a list of reasons with counts. The seeding obligation belongs to
+    /// the torrent, so that line counts torrents and says how many files they come to; a file
+    /// kept for a reason of its own is counted as a file, because that is what it is.
+    fn append_seeding_line(&self, out: &mut String) {
+        let mut torrents: Vec<&str> = Vec::new();
+        let mut files = 0usize;
+        let mut other: Vec<(&str, usize)> = Vec::new();
+        for (_, hash, _, why) in &self.kept {
+            if crate::config::is_about_seeding(why) {
+                files += 1;
+                if !torrents.contains(&hash.as_str()) {
+                    torrents.push(hash);
+                }
+            } else {
+                match other.iter_mut().find(|(w, _)| w == why) {
+                    Some((_, n)) => *n += 1,
+                    None => other.push((why, 1)),
+                }
+            }
+        }
+        if !torrents.is_empty() {
+            out.push_str(&format!(
+                "\nseedelendő: {} torrent ({files} fájl összesen)",
+                torrents.len()
+            ));
+        }
+        other.sort_by(|a, b| b.1.cmp(&a.1));
+        for (why, n) in other {
+            out.push_str(&format!("\negyéb okból megtartva: {n} fájl ({why})"));
+        }
+    }
+
     /// The run in one message, for a push notification.
     ///
     /// Sent whether anything went or not: "nothing was deleted" is the answer to the same
     /// question as "these went", and a nightly job that only speaks up sometimes is a job you
-    /// end up checking by hand. The reasons are grouped rather than listed per download, so a
-    /// library of fifty does not arrive as fifty lines on a phone.
+    /// end up checking by hand.
     pub fn notification(&self, disks: &[String]) -> String {
         let mut out = String::new();
         if let Some(why) = &self.abandoned {
             out.push_str(&format!("A takarítás megállt: {why}\nSemmi nem törlődött."));
         } else if self.deleted.is_empty() {
-            out.push_str(&format!(
-                "Nem törölt semmit. {} letöltés van a nyilvántartásban.",
-                self.considered
-            ));
-            let mut grouped: Vec<(&str, usize)> = Vec::new();
-            for (_, why) in &self.kept {
-                match grouped.iter_mut().find(|(w, _)| w == why) {
-                    Some((_, n)) => *n += 1,
-                    None => grouped.push((why, 1)),
-                }
-            }
-            grouped.sort_by(|a, b| b.1.cmp(&a.1));
-            for (why, n) in grouped {
-                out.push_str(&format!("\n{n} db: {why}"));
-            }
+            out.push_str("törölt elemek száma: 0");
+            self.append_seeding_line(&mut out);
         } else {
             out.push_str(&format!(
-                "Törölve {} db, felszabadult {}:",
+                "törölt elemek száma: {} (felszabadult {})",
                 self.deleted.len(),
                 crate::media::size_label(self.freed_bytes)
             ));
             for title in &self.deleted {
-                out.push_str(&format!("\n{title}"));
+                out.push_str(&format!("\n- {title}"));
             }
-            if !self.kept.is_empty() {
-                out.push_str(&format!("\nMegtartva: {} db.", self.kept.len()));
-            }
+            self.append_seeding_line(&mut out);
         }
         for line in disks {
             out.push_str(&format!("\n{line}"));
@@ -225,7 +247,12 @@ pub async fn sweep_with<W: World>(
         };
 
         match cfg.verdict(&candidate) {
-            Verdict::Keep(why) => report.kept.push((item.title.clone(), why)),
+            Verdict::Keep(scope, why) => report.kept.push((
+                item.title.clone(),
+                item.info_hash.clone(),
+                scope,
+                why,
+            )),
             // A dry run stops here: the verdict is the answer it was asked for.
             Verdict::Delete if mode == Mode::DryRun => {
                 report.deleted.push(item.title.clone());
@@ -243,11 +270,17 @@ pub async fn sweep_with<W: World>(
                 // to stay on the books, or the data becomes an orphan nothing knows about.
                 store.remove(&item.key()).await;
                 report.freed_bytes = report.freed_bytes.saturating_add(item.file_len);
+                report.deleted_paths.push(item.save_path.clone());
                 report.deleted.push(item.title.clone());
             } else {
                 report
                     .kept
-                    .push((item.title.clone(), "a törlés nem sikerült"));
+                    .push((
+                        item.title.clone(),
+                        item.info_hash.clone(),
+                        crate::config::Scope::File,
+                        "a törlés nem sikerült",
+                    ));
             }
         }
     }
@@ -272,7 +305,7 @@ pub async fn run_once<W: World + 'static>(world: &W, store: &Arc<Store>, why: &s
     let maintenance = world.settings().await;
     let report = sweep(world, store, &maintenance, state::now()).await;
     tracing::info!(trigger = why, "{}", report.summary());
-    for (title, reason) in &report.kept {
+    for (title, _, _, reason) in &report.kept {
         tracing::debug!(title = %title, reason = %reason, "kept");
     }
     for title in &report.deleted {
@@ -299,12 +332,53 @@ pub async fn run_once<W: World + 'static>(world: &W, store: &Arc<Store>, why: &s
         tracing::warn!(error = %e, "could not write the state file after the sweep");
     }
 
+    // Measured only once the files have actually gone.
+    //
+    // libtorrent deletes asynchronously: remove_torrent returns at once and its disk thread does
+    // the work afterwards. Measuring straight away reported the space as it was before the run,
+    // which read as a deletion that freed nothing: "freed 24.65 GiB" on one line and "10.51 GiB
+    // free" on the next, with the true 35.29 GiB only showing up in the following run's message.
+    wait_until_gone(&report.deleted_paths).await;
+
     world.check_disk_space().await;
     let disks = world.disk_lines().await;
-    world
-        .notify(&format!("{why}\n{}", report.notification(&disks)))
-        .await;
+    if maintenance.notify_sweep {
+        world
+            .notify(&format!("{why}\n{}", report.notification(&disks)))
+            .await;
+    }
     report
+}
+
+/// Waits for deleted files to leave the filesystem, up to a few seconds.
+///
+/// Not a fixed sleep: it asks the question it actually wants answered, and returns the moment
+/// the answer is yes. A path that will not go away is not worth waiting on for ever either, so
+/// the wait is bounded and the measurement that follows is simply taken as it stands.
+async fn wait_until_gone(paths: &[String]) {
+    const LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+    const STEP: std::time::Duration = std::time::Duration::from_millis(250);
+    if paths.is_empty() {
+        return;
+    }
+    let deadline = std::time::Instant::now() + LIMIT;
+    loop {
+        let remaining = paths
+            .iter()
+            .filter(|p| std::path::Path::new(p.as_str()).exists())
+            .count();
+        if remaining == 0 {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            tracing::warn!(
+                remaining,
+                "some deleted files were still on the disk when the space was measured"
+            );
+            return;
+        }
+        tokio::time::sleep(STEP).await;
+    }
 }
 
 pub fn spawn<W: World + 'static>(world: Arc<W>, store: Arc<Store>) {
@@ -315,7 +389,7 @@ pub fn spawn<W: World + 'static>(world: Arc<W>, store: Arc<Store>) {
         tokio::time::sleep(std::time::Duration::from_secs(45)).await;
         let settings = world.settings().await;
         let quiet_enough = state::now().saturating_sub(store.last_sweep_at().await) >= 3600;
-        if settings.enable_deletion && quiet_enough {
+        if settings.enable_deletion && settings.sweep_on_start && quiet_enough {
             store.set_last_sweep_at(state::now()).await;
             run_once(&*world, &store, "Induláskori takarítás").await;
         }
@@ -556,8 +630,8 @@ mod tests {
         assert_eq!(sent.len(), 1, "one message per run");
         let msg = &sent[0];
         assert!(msg.starts_with("Teszt"), "it says which run: {msg}");
-        assert!(msg.contains("Törölve 1 db"), "{msg}");
-        assert!(msg.contains("film h1"), "{msg}");
+        assert!(msg.contains("törölt elemek száma: 1"), "{msg}");
+        assert!(msg.contains("- film h1"), "{msg}");
         assert!(msg.contains("szabad"), "and what the disks look like: {msg}");
 
         // Nothing to do: still a message, with the reasons grouped.
@@ -569,8 +643,41 @@ mod tests {
         let world = Arc::new(Fake::new());
         run_once(&*world, &store, "Teszt").await;
         let msg = world.notified.lock().unwrap()[0].clone();
-        assert!(msg.contains("Nem törölt semmit"), "{msg}");
-        assert!(msg.contains("1 db: megtartásra jelölve"), "{msg}");
+        assert!(msg.contains("törölt elemek száma: 0"), "{msg}");
+        // Counted as a file, because being marked to keep is a fact about the file and not
+        // about the torrent's obligation.
+        assert!(
+            msg.contains("egyéb okból megtartva: 1 fájl (megtartásra jelölve)"),
+            "{msg}"
+        );
+    }
+
+    /// A reason that belongs to the torrent is counted in torrents. Three episodes of one pack
+    /// held back because the pack owes seeding is one torrent, not three downloads, and the
+    /// difference is what somebody reading the message on a phone needs.
+    #[tokio::test]
+    async fn a_torrents_reason_is_counted_in_torrents() {
+        let now = state::now();
+        let mut items = Vec::new();
+        for index in 0..3 {
+            let mut item = ripe("pack", now);
+            item.file_index = index;
+            item.title = format!("pack rész {index}");
+            items.push(item);
+        }
+        let store = store_with(items).await;
+        let world = Arc::new(Fake {
+            // The tracker still wants seeding on that one torrent.
+            owed: Some(vec!["4207293".to_string()]),
+            ..Fake::new()
+        });
+        let report = run_once(&*world, &store, "Teszt").await;
+
+        assert!(report.deleted.is_empty());
+        assert_eq!(report.kept.len(), 3, "three files");
+        let msg = world.notified.lock().unwrap()[0].clone();
+        assert!(msg.contains("seedelendő: 1 torrent (3 fájl összesen)"), "{msg}");
+        assert!(msg.contains("törölt elemek száma: 0"), "{msg}");
     }
 
     #[tokio::test]
@@ -621,8 +728,11 @@ mod tests {
             report.kept,
             vec![(
                 "film h1".to_string(),
+                "h1".to_string(),
+                crate::config::Scope::Torrent,
                 "a tracker szerint még seedelni kell"
-            )]
+            )],
+            "and the reason is about the torrent, not this one file"
         );
     }
 
@@ -638,7 +748,7 @@ mod tests {
 
         let report = sweep(&world, &store, &deleting(), now).await;
         assert!(report.deleted.is_empty());
-        assert_eq!(report.kept[0].1, "épp játszik");
+        assert_eq!(report.kept[0].3, "épp játszik");
     }
 
     /// With deletion off the tracker is not even asked: no traffic for a question
@@ -697,7 +807,7 @@ mod tests {
 
         assert!(report.abandoned.is_none(), "the tracker was not consulted");
         assert!(report.deleted.is_empty());
-        assert_eq!(report.kept[0].1, "az automatikus törlés ki van kapcsolva");
+        assert_eq!(report.kept[0].3, "az automatikus törlés ki van kapcsolva");
     }
 
     /// A file that cannot be removed must stay in the records, or the server would
@@ -714,7 +824,7 @@ mod tests {
         let report = sweep(&world, &store, &deleting(), now).await;
 
         assert!(report.deleted.is_empty());
-        assert_eq!(report.kept[0].1, "a törlés nem sikerült");
+        assert_eq!(report.kept[0].3, "a törlés nem sikerült");
         assert!(store.get("h1:0").await.is_some());
     }
 

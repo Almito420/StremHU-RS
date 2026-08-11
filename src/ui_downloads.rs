@@ -226,7 +226,9 @@ pub(crate) async fn downloads_page(state: &AppState, message: Option<String>) ->
                 "a következő körben törlődik".to_string(),
                 "következő kör".to_string(),
             ),
-            crate::config::Verdict::Keep(why) => (format!("megtartva: {why}"), short_reason(why)),
+            crate::config::Verdict::Keep(_, why) => {
+                (format!("megtartva: {why}"), short_reason(why))
+            }
         };
 
         // Distinct parts of the file that were sent, from the coverage map.
