@@ -79,10 +79,41 @@ mod sys {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
+mod sys {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Path;
+
+    /// Free and total bytes for the filesystem holding `path`, from `statvfs`.
+    ///
+    /// The free figure is `f_bavail`, what an unprivileged process may actually use, rather than
+    /// `f_bfree`, which counts the blocks reserved for root as well. Same choice as on Windows,
+    /// where the figure asked for is the one available to this account: a write is refused by the
+    /// smaller number, so the smaller number is the honest one to plan with.
+    pub fn space(path: &Path) -> Option<(u64, u64)> {
+        let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
+        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } != 0 {
+            return None;
+        }
+        // f_frsize is the fragment size the block counts are in; f_bsize is a hint for I/O.
+        let block = if stat.f_frsize > 0 {
+            stat.f_frsize as u64
+        } else {
+            stat.f_bsize as u64
+        };
+        Some((
+            (stat.f_bavail as u64).saturating_mul(block),
+            (stat.f_blocks as u64).saturating_mul(block),
+        ))
+    }
+}
+
+#[cfg(not(any(windows, unix)))]
 mod sys {
     use std::path::Path;
-    /// Not implemented off Windows; the caller treats None as "unknown" and carries on.
+    /// Nowhere else is supported; the caller treats None as "unknown" and carries on.
     pub fn space(_path: &Path) -> Option<(u64, u64)> {
         None
     }
@@ -286,8 +317,6 @@ pub fn report(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const GB: u64 = 1024 * 1024 * 1024;
 
     /// The measurement the whole module rests on. A real folder on this machine has to
     /// report a plausible volume, or the choice between disks is guesswork.

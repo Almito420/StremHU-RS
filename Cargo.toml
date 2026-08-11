@@ -29,3 +29,8 @@ url = "2.5.8"
 
 [build-dependencies]
 cmake = "0.1.58"
+
+# Only on unix, and only for two calls: statvfs for free space, and sysconf for the clock
+# tick the process times are counted in. Windows gets both from its own API.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

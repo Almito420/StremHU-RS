@@ -154,7 +154,7 @@ másodperc alatti puffert adott, és a stream pár másodperc után megállt. It
 
 ## Mire van szükség
 
-- Windows 10 vagy 11, 64 bit.
+- Windows 10 vagy 11, 64 bit. Linuxra is fordul, [lásd lentebb](#linux).
 - nCore fiók.
 - [TMDB](https://www.themoviedb.org/settings/api) API kulcs, ingyenes.
 - Semmi más. A kiadás zipje mindent tartalmaz, a Microsoft C++ futtatókörnyezetet is.
@@ -196,6 +196,138 @@ torrent folytatási adatait.
 
 ---
 
+## Linux
+
+Linuxra nincs kész kiadás, mert a bináris a rendszer libtorrentjéhez linkelődik, az pedig
+disztribúciónként más verzió. A fordítás viszont egy másolás és két parancs, és utána ugyanaz a
+program fut, ugyanazzal a `config.toml`-lal és ugyanazzal a webes felülettel.
+
+Az alábbi menet **Ubuntu 24.04**-en van végigpróbálva. Debian 12-n és Mint 21-en ugyanezek a
+csomagnevek, csak a libtorrent verziója más.
+
+### 1. Csomagok
+
+```bash
+sudo apt update
+sudo apt install -y build-essential cmake pkg-config \
+                    libtorrent-rasterbar-dev libssl-dev \
+                    curl ca-certificates git
+```
+
+Ez az egyetlen igazi függőség a `libtorrent-rasterbar-dev`: Ubuntu 24.04-en **2.0.10**, tehát egy
+javítócsomaggal a Windowson használt 2.0.11 alatt. A shim ugyanazokat a hívásokat használja
+mindkettőn, semmit sem kell átírni miatta.
+
+Rust, ha még nincs:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+. "$HOME/.cargo/env"
+```
+
+### 2. Fordítás
+
+```bash
+git clone https://github.com/Almito420/StremHU---RS.git stremhu-rs
+cd stremhu-rs
+cargo build --release
+cargo test --release      # 267 teszt, ebből 2 csak Linuxon fut
+```
+
+A `build.rs` észreveszi, hogy nem Windowsra fordít: nem vcpkg-t keres, hanem a rendszer
+libtorrentjét (`find_package`), a shim `libstremhu_shim.so`-ként épül, és a bináris mellé kerül. A
+betöltési útvonal `$ORIGIN`-nel van beégetve, tehát a két fájlt együtt kell tartani, de nem kell se
+`LD_LIBRARY_PATH`, se `ldconfig`.
+
+### 3. Telepítés
+
+```bash
+sudo mkdir -p /opt/stremhu-rs
+sudo cp target/release/stremhu-rs target/release/libstremhu_shim.so /opt/stremhu-rs/
+sudo useradd --system --home /opt/stremhu-rs stremhu
+sudo chown -R stremhu:stremhu /opt/stremhu-rs
+```
+
+Ennyi a telepítés: két fájl. Minden mást — `config.toml`, `state.json`, `downloads/`, `torrents/`,
+`certs/` — a program hoz létre az első indításnál a **bináris mellé**, ezért kell a mappa a
+szolgáltatás felhasználójának írhatóra. Ha a letöltéseket máshova akarod (jellemzően így van, mert
+egy nagy lemezre kell), akkor a `config.toml`-ban abszolút útvonalakat adj meg:
+
+```toml
+[storage]
+state_path = "/var/lib/stremhu-rs/state.json"
+torrent_files_dir = "/var/lib/stremhu-rs/torrents"
+
+[torrent]
+save_path = "/mnt/media/downloads"
+save_path_secondary = ""
+```
+
+A konfigurációs fájl máshonnan is jöhet, a `STREMHU_CONFIG` környezeti változóval.
+
+### 4. Szolgáltatásként
+
+Windowson az a kikötés, hogy ne ugorjon fel ablak; Linuxon ennek a systemd a megfelelője.
+`/etc/systemd/system/stremhu-rs.service`:
+
+```ini
+[Unit]
+Description=stremhu-rs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=stremhu
+WorkingDirectory=/opt/stremhu-rs
+ExecStart=/opt/stremhu-rs/stremhu-rs --log
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now stremhu-rs
+journalctl -u stremhu-rs -f
+```
+
+A `--log` itt azért van a sorban, mert alapból a program nem logol semmit, és a systemd alatt a
+naplózás nem kerül semmibe: a kimenet a journalba megy, nem egy fájlba, amit rotálni kell. Indulási
+hibát `--log` nélkül is kiír, azt a journalban akkor is megtalálod.
+
+### 5. Tűzfal
+
+```bash
+sudo ufw allow 3080/tcp      # beállítások és az addon HTTP-n
+sudo ufw allow 3443/tcp      # HTTPS, ez kell a tévéhez
+sudo ufw allow 6890          # torrent, TCP és UDP
+```
+
+A 6890 az egyetlen, amit a routeren is át kell engedni, és nem a kényelemért: enélkül csak kimenő
+kapcsolat van, a visszaseedelés pedig pont a bejövőkön múlik.
+
+### Amit tudni érdemes
+
+- **Ami ki van próbálva Linuxon:** a fordítás, a 267 teszt, a libtorrent motor indulása (a `/status`
+  a shimen keresztül olvassa ki a verziót), a szabad hely mérése (`statvfs`), a processzor- és
+  memóriafogyasztás olvasása (`/proc/self/stat`, `/proc/self/status` `RssAnon`), a webes felület és
+  az addon manifest. Ubuntu 24.04 / WSL2, gcc 13.3, libtorrent 2.0.10.
+- **Amit Windowson teszteltem végig:** a valódi nCore letöltés, a részenkénti fájlválasztás, a
+  törlés, a HTTPS tanúsítvány megszerzése, a Stremio lejátszás. Ezek a részek nem tartalmaznak
+  platformfüggő kódot, de ezt Linuxon nem én mértem meg.
+- **A memóriafigyelő** Linuxon az `RssAnon` értéket nézi, nem a `VmRSS`-t. A kettő között a
+  fájlalapú lapok vannak, azaz libtorrent memóriába képezett írásai: ugyanez a különbség Windowson
+  1808 MB és 71 MB volt, tehát a nagyobbik szám alapján a figyelő egy makkegészséges szervert
+  jelentett volna hibásnak.
+- **Nagybetűs fájlnevek.** Linux megkülönbözteti őket, Windows nem. Egy Windowsról átmozgatott
+  `downloads/` mappánál ez újraellenőrzést vagy újratöltést okozhat, tehát a `state.json`-t és a
+  letöltéseket együtt, ugyanarra a platformra érdemes vinni.
+
+---
+
 ## Beállítások
 
 Minden a `config.toml`-ban van, és a fontosabbak a felületről is állíthatók. A
@@ -213,7 +345,9 @@ Minden a `config.toml`-ban van, és a fontosabbak a felületről is állítható
 | `maintenance.keep_seed_seconds` | tartalék, ha a trackertől nincs adat a torrentről |
 | `maintenance.cache_retention_seconds` | elhagyott `.torrent` fájlok megtartása |
 
-## Fordítás forrásból
+## Fordítás forrásból (Windows)
+
+Linuxhoz a [Linux szakasz](#linux) írja le a menetet.
 
 ```powershell
 git clone https://github.com/microsoft/vcpkg D:\vcpkg
@@ -226,7 +360,8 @@ cargo test --release
 ```
 
 A `build.rs` lefordítja a C ABI shimet (`shim/shim.cpp`) CMake-kel, és a szükséges DLL-eket a
-bináris mellé másolja. A shim azért van, mert a `set_piece_deadline` az egyetlen dolog, amivel a
+bináris mellé másolja; Linuxon ugyanez a shim `.so`-ként épül a rendszer libtorrentjéhez. A shim
+azért van, mert a `set_piece_deadline` az egyetlen dolog, amivel a
 letöltés sorrendje **utasítható**: a soros letöltés és a piece prioritások csak javaslatok, egy
 valódi swarmon a folytonos front 13254-ből 8 piece-nél megállt, miközben a torrent 30%-a már
 megvolt.

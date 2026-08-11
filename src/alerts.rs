@@ -184,7 +184,65 @@ pub fn usage(previous_cpu: u64, elapsed: std::time::Duration) -> (f64, u64, u64)
     (share, rss, cpu)
 }
 
-#[cfg(not(windows))]
+/// Processor time in hundreds of nanoseconds from `/proc/self/stat`.
+///
+/// The command name is in the second field and may itself contain spaces and brackets, so the
+/// fields are counted from the last `)` rather than from the start. That detail is the whole
+/// reason this is a function with a test: splitting on whitespace from the beginning works on
+/// every process except the one whose name contains a space, and then it silently reads the
+/// wrong numbers.
+#[cfg(unix)]
+pub fn parse_proc_stat_cpu(text: &str, ticks_per_second: u64) -> Option<u64> {
+    let after = text.rsplit_once(')')?.1;
+    let fields: Vec<&str> = after.split_whitespace().collect();
+    // After the `)` the first field is state, so utime is the 12th and stime the 13th.
+    let utime: u64 = fields.get(11)?.parse().ok()?;
+    let stime: u64 = fields.get(12)?.parse().ok()?;
+    let ticks = utime.checked_add(stime)?;
+    let per_second = ticks_per_second.max(1);
+    // The same unit Windows reports processor time in, so the caller does not care which is which.
+    Some(ticks.saturating_mul(10_000_000) / per_second)
+}
+
+/// Privately held memory in bytes from `/proc/self/status`.
+///
+/// `RssAnon` rather than `VmRSS`: the difference is file-backed pages, which for this program is
+/// libtorrent's memory-mapped writing. Measured on Windows the same distinction was 1808 MB of
+/// working set against 71 MB genuinely held, and watching the larger number would report a
+/// perfectly healthy server as a problem.
+#[cfg(unix)]
+pub fn parse_proc_status_rss_anon(text: &str) -> Option<u64> {
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("RssAnon:") {
+            let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
+            return Some(kb.saturating_mul(1024));
+        }
+    }
+    None
+}
+
+#[cfg(unix)]
+pub fn usage(previous_cpu: u64, elapsed: std::time::Duration) -> (f64, u64, u64) {
+    let ticks_per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u64;
+    let cpu = std::fs::read_to_string("/proc/self/stat")
+        .ok()
+        .and_then(|t| parse_proc_stat_cpu(&t, ticks_per_second))
+        .unwrap_or(previous_cpu);
+    let rss = std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|t| parse_proc_status_rss_anon(&t))
+        .unwrap_or(0);
+
+    let used = cpu.saturating_sub(previous_cpu) as f64 / 10_000_000.0;
+    let share = if elapsed.as_secs_f64() > 0.0 {
+        used / elapsed.as_secs_f64()
+    } else {
+        0.0
+    };
+    (share, rss, cpu)
+}
+
+#[cfg(not(any(windows, unix)))]
 pub fn usage(previous_cpu: u64, _elapsed: std::time::Duration) -> (f64, u64, u64) {
     (0.0, 0, previous_cpu)
 }
@@ -229,6 +287,39 @@ pub fn sustained_problem(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The command name sits in brackets and may contain spaces, which is why the fields are
+    /// counted from the last bracket. Splitting from the start reads the wrong numbers for any
+    /// process whose name has a space in it, and says nothing about having done so.
+    #[test]
+    #[cfg(unix)]
+    fn proc_stat_is_read_from_the_last_bracket() {
+        // Real shape, trimmed: pid, comm, state, then the numbers. utime=1234, stime=567.
+        let line = "4242 (stremhu-rs) S 1 4242 4242 0 -1 4194304 900 0 0 0 1234 567 0 0 20 0 5 0";
+        // At a hundred ticks a second, 1801 ticks is 18.01 seconds of processor time.
+        let hundred_ns = parse_proc_stat_cpu(line, 100).expect("parses");
+        assert_eq!(hundred_ns, 180_100_000);
+
+        // A name with a space and a bracket in it must not throw the count off.
+        let awkward = "7 (my (odd) name) S 1 7 7 0 -1 0 0 0 0 0 10 20 0 0 20 0 5 0";
+        assert_eq!(parse_proc_stat_cpu(awkward, 100).expect("parses"), 3_000_000);
+
+        assert!(parse_proc_stat_cpu("nonsense", 100).is_none());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn proc_status_gives_the_privately_held_memory() {
+        let status = "Name:	stremhu-rs
+VmRSS:	 1849344 kB
+RssAnon:	   72704 kB
+                      RssFile:	 1776640 kB
+";
+        // The anonymous part, not the resident total: the difference is mapped file pages.
+        assert_eq!(parse_proc_status_rss_anon(status), Some(72_704 * 1024));
+        assert_eq!(parse_proc_status_rss_anon("Name:	x
+"), None);
+    }
 
     /// The wiring that actually matters: an error has to reach the sink even when logging is
     /// switched off, because that is how the server normally runs. A filter that swallowed the
