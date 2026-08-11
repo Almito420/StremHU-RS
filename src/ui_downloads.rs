@@ -275,9 +275,6 @@ pub(crate) async fn downloads_page(state: &AppState, message: Option<String>) ->
             format!("{}%", item.served_percent().min(99))
         };
 
-        // The tracker's figures, or a plain dash so an empty cell is not mistaken for a
-        // zero. A zero and "we have not asked yet" mean very different things here.
-        let known = item.tracker_figures_at.is_some();
         rows.push(crate::webui::DownloadRow {
             key: item.key(),
             watched_by_hand: item.watched_manually,
@@ -300,32 +297,6 @@ pub(crate) async fn downloads_page(state: &AppState, message: Option<String>) ->
             watched,
             owed_label: owed_label(&item, owes, asked_now).0.to_string(),
             owed_class: owed_label(&item, owes, asked_now).1,
-            owed_detail: owed_detail(
-                &item,
-                owes,
-                asked_now,
-                owed_entry.and_then(|e| e.remaining_secs),
-                now,
-            ),
-            downloaded: if known {
-                crate::webui::human_size(item.tracker_downloaded_bytes)
-            } else {
-                "-".into()
-            },
-            uploaded: if known {
-                crate::webui::human_size(item.tracker_uploaded_bytes)
-            } else {
-                "-".into()
-            },
-            ratio: if known && !item.tracker_ratio.is_empty() {
-                item.tracker_ratio.clone()
-            } else {
-                "-".into()
-            },
-            figures_age: match item.tracker_figures_at {
-                Some(at) => crate::webui::human_ago(now.saturating_sub(at)),
-                None => "még nem kérdeztük".into(),
-            },
             keep: item.keep,
             verdict,
             verdict_short,
@@ -393,6 +364,7 @@ pub(crate) async fn downloads_page(state: &AppState, message: Option<String>) ->
                 hash,
                 title: String::new(),
                 summary: String::new(),
+                figures: String::new(),
                 owed_label: String::new(),
                 owed_class: "owed-unknown",
                 owed_detail: String::new(),
@@ -428,7 +400,42 @@ pub(crate) async fn downloads_page(state: &AppState, message: Option<String>) ->
         };
         g.owed_label = first.owed_label.clone();
         g.owed_class = first.owed_class;
-        g.owed_detail = first.owed_detail.clone();
+        // The tracker's figures, once, from any record of this torrent: they are the torrent's,
+        // so every record carries the same copy of them.
+        g.figures = match all_items.iter().find(|i| i.info_hash == g.hash) {
+            Some(i) if i.tracker_figures_at.is_some() => format!(
+                "letöltve {} · vissza {} · arány {} ({})",
+                crate::webui::human_size(i.tracker_downloaded_bytes),
+                crate::webui::human_size(i.tracker_uploaded_bytes),
+                if i.tracker_ratio.is_empty() {
+                    "-".to_string()
+                } else {
+                    i.tracker_ratio.clone()
+                },
+                match i.tracker_figures_at {
+                    Some(at) => crate::webui::human_ago(now.saturating_sub(at)),
+                    None => "még nem kérdeztük".into(),
+                }
+            ),
+            _ => "a trackertől még nincs adat".to_string(),
+        };
+        // And how long that obligation has left, said here and nowhere else. It is one debt per
+        // torrent, so the file rows carry the word "igen" and this line carries the clock.
+        g.owed_detail = match all_items.iter().find(|i| i.info_hash == g.hash) {
+            Some(i) => {
+                let entry = snapshot.entries.iter().find(|e| {
+                    !i.ncore_torrent_id.is_empty() && e.torrent_id == i.ncore_torrent_id
+                });
+                let asked_now = snapshot.fetched_at.is_some() && snapshot.error.is_none();
+                let owes = if asked_now {
+                    entry.is_some()
+                } else {
+                    i.owed_to_tracker
+                };
+                owed_detail(i, owes, asked_now, entry.and_then(|e| e.remaining_secs), now)
+            }
+            None => String::new(),
+        };
         // Opened when something in it is about to go, so a deletion is never hidden behind a
         // closed row.
         g.open = g.rows.iter().any(|r| r.verdict_short == "következő kör");
@@ -445,14 +452,18 @@ pub(crate) async fn downloads_page(state: &AppState, message: Option<String>) ->
 /// The reason a download survives, short enough for a table cell. The full sentence
 /// stays available as the cell's tooltip.
 pub(crate) fn short_reason(why: &str) -> String {
+    // Every seeding reason reads the same here. Which of the six rules is the one holding a
+    // file is a question for the tooltip; what the column answers is whether this file may go
+    // yet, and "a tracker szerint még seedelni kell" and "ennek a fájlnak még hátravan a
+    // seedelése" were two ways of writing the same no. The duration underneath says whose
+    // seeding it is and how long it has to run.
+    if crate::config::is_about_seeding(why) {
+        return "seedelés szükséges".to_string();
+    }
     match why {
-        "automatic deletion is off" => "kikapcsolva",
-        "being played right now" => "épp játszik",
-        "marked to keep" => "megtartva",
-        "not watched yet" => "nem nézted meg",
-        "the tracker still expects seeding" => "seedelni kell",
-        "has not seeded long enough" => "még seedel",
-        "still within the retention window" => "túl friss",
+        "az automatikus törlés ki van kapcsolva" => "kikapcsolva",
+        "megtartásra jelölve" => "megtartva",
+        "még nem néztük meg" => "nem nézted meg",
         other => other,
     }
     .to_string()

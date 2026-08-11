@@ -211,20 +211,21 @@ külön státuszok, se találgatás.
 ## Indulás nulláról
 
 1. Töltsd le a [kiadás](../../releases) Windows zipjét, és csomagold ki egy mappába, például
-   `D:\stremhu-rs`. A zipben egyetlen `bin` mappa van, semmi más.
-2. Indítsd el a `bin\stremhu-rs.exe`-t. **Nem nyílik ablak**: ez egy szerver, ami a háttérben fut.
+   `D:\stremhu-rs`.
+2. Indítsd el a `stremhu-rs.exe`-t. **Nem nyílik ablak**: ez egy szerver, ami a háttérben fut.
 3. Nyisd meg: <http://localhost:3080/ui>
 4. Adj meg egy admin jelszót, aztán az nCore fiókot és a TMDB kulcsot.
 5. A lap kiírja az **addon URL-t**. Ezt illeszd be a Stremióba.
 
 ### Mappastruktúra
 
-A kiadásban csak a `bin` van; a többit a program az első indításnál maga hozza létre, egy
-szinttel a `bin` fölött:
+Egy mappa, és abban minden. A kiadásban a program és a könyvtárai vannak, a többit az első
+indítás hozza létre:
 
 ```
 stremhu-rs\
-  bin\             a program és a DLL-jei, ehhez nem kell hozzányúlni
+  stremhu-rs.exe   a program
+  *.dll            a libtorrent, a Boost, az OpenSSL és a C++ futtatókörnyezet
   config.toml      a beállítások, alapértékekkel kitöltve
   data\
     state.json     mi van a lemezen, mit néztünk meg
@@ -235,13 +236,14 @@ stremhu-rs\
 ```
 
 A DLL-ek azért vannak a program mellett és nem külön mappában, mert a Windows a betöltendő
-könyvtárakat a futtatható fájl saját mappájából oldja fel: kettéválasztani őket csak úgy
-lehetne, hogy a program indulás előtt nem tud elindulni. Így viszont egy mappa van, amiben
-nem kell keresni semmit, és a gyökérben csak az van, amihez a felhasználónak köze van.
+könyvtárakat a futtatható fájl **saját** mappájából, a System32-ből és a PATH-ról oldja fel,
+alkönyvtárból soha, és ez még a program első utasítása előtt megtörténik. Kipróbálva: a DLL-eket
+egy szomszédos mappába tolva a folyamat létrejön, de nem szolgál ki semmit és naplót sem ír.
+Külön mappa csak úgy lehetne, ha a shimet futásidőben töltenénk be (`LoadLibraryEx`), és a
+`vcruntime140.dll` akkor is a program mellett maradna, mert az magának az exének kell.
 
-A program a `bin` mappát felismeri, és eggyel feljebb dolgozik. Ha a futtatható fájl **nem**
-`bin`-ben van, akkor a saját mappája a gyökér: egy korábbi, lapos telepítés ezért változatlanul
-működik tovább, nem kell átrendezni.
+Amit a program generál, az viszont névvel ellátott mappákba megy, tehát a gyökérben a
+`config.toml`-on kívül nincs olyan fájl, amivel dolgod van.
 
 Semmi más: se registry, se AppData, se rejtett mappa. A mappa egészben másolható, mozgatható,
 törölhető.
@@ -312,16 +314,15 @@ betöltési útvonal `$ORIGIN`-nel van beégetve, tehát a két fájlt együtt k
 ### 3. Telepítés
 
 ```bash
-sudo mkdir -p /opt/stremhu-rs/bin
-sudo cp target/release/stremhu-rs target/release/libstremhu_shim.so /opt/stremhu-rs/bin/
+sudo mkdir -p /opt/stremhu-rs
+sudo cp target/release/stremhu-rs target/release/libstremhu_shim.so /opt/stremhu-rs/
 sudo useradd --system --home /opt/stremhu-rs stremhu
 sudo chown -R stremhu:stremhu /opt/stremhu-rs
 ```
 
-Ennyi a telepítés: két fájl, a `bin` mappában. Minden mást — `config.toml`, `data/state.json`,
-`data/torrents/`, `data/certs/`, `downloads/`, `logs/` — a program hoz létre az első indításnál,
-egy szinttel a `bin` fölött, tehát itt `/opt/stremhu-rs` alatt; ezért kell az a mappa a
-szolgáltatás felhasználójának írhatóra. Ha a letöltéseket máshova akarod (jellemzően így van, mert
+Ennyi a telepítés: két fájl. Minden mást — `config.toml`, `data/state.json`, `data/torrents/`,
+`data/certs/`, `downloads/`, `logs/` — a program hoz létre az első indításnál a bináris mellé,
+ezért kell a mappa a szolgáltatás felhasználójának írhatóra. Ha a letöltéseket máshova akarod (jellemzően így van, mert
 egy nagy lemezre kell), akkor a `config.toml`-ban abszolút útvonalakat adj meg:
 
 ```toml
@@ -351,7 +352,7 @@ Wants=network-online.target
 Type=simple
 User=stremhu
 WorkingDirectory=/opt/stremhu-rs
-ExecStart=/opt/stremhu-rs/bin/stremhu-rs --log
+ExecStart=/opt/stremhu-rs/stremhu-rs --log
 Restart=on-failure
 RestartSec=5
 

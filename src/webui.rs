@@ -330,6 +330,11 @@ pub struct TorrentGroup {
     pub title: String,
     /// The one-line summary: how many files, how many watched, how much room.
     pub summary: String,
+    /// What the tracker counted against this torrent: downloaded, given back, the ratio, and
+    /// how old the figures are. One torrent, one set of figures. A file of a pack has no
+    /// downloaded amount of its own, and printing the torrent's beside each of them said that
+    /// every episode had pulled down the whole 38.52 GiB.
+    pub figures: String,
     /// Whether the tracker still wants seeding on this torrent, ready to display.
     pub owed_label: String,
     pub owed_class: &'static str,
@@ -349,18 +354,16 @@ fn render_groups(groups: &[TorrentGroup]) -> String {
             "<details class=\"grp\"{open}>\n\
              <summary><span class=\"gt\">{title}</span>\
              <span class=\"gs\">{summary}</span>\
+             <span class=\"gf\">{figures}</span>\
              <span class=\"go {owed_class}\">{owed_label}{owed_detail}</span></summary>\n\
              <div class=\"scroll\"><table class=\"grid\">\n\
              <tr><th>Fájl</th><th class=\"num\">Méret</th>\
-             <th class=\"num\">Letöltve<div class=\"note\">torrent</div></th>\
-             <th class=\"num\">Visszaseedelve<div class=\"note\">torrent</div></th>\
-             <th class=\"num\">Arány<div class=\"note\">torrent</div></th>\
-             <th>Seed kötelezettség<div class=\"note\">torrent</div></th>\
-             <th>Megnézve</th><th>Törlés</th><th></th></tr>\n\
+             <th>Seed kötelezettség</th><th>Megnézve</th><th>Törlés</th><th></th></tr>\n\
              {rows}</table></div></details>\n",
             open = if group.open { " open" } else { "" },
             title = html_escape(&group.title),
             summary = html_escape(&group.summary),
+            figures = html_escape(&group.figures),
             owed_class = group.owed_class,
             owed_label = html_escape(&group.owed_label),
             owed_detail = if group.owed_detail.is_empty() {
@@ -376,24 +379,15 @@ fn render_groups(groups: &[TorrentGroup]) -> String {
 
 fn render_rows(rows: &[DownloadRow]) -> String {
     if rows.is_empty() {
-        return "<tr><td colspan=\"9\" class=\"note\">Nincs kiszolgált fájl.</td></tr>".into();
+        return "<tr><td colspan=\"6\" class=\"note\">Nincs kiszolgált fájl.</td></tr>".into();
     }
     let mut out = String::new();
     for row in rows {
-
-        let age = if row.figures_age.is_empty() {
-            String::new()
-        } else {
-            format!("<div class=\"note\">{}</div>", html_escape(&row.figures_age))
-        };
         out.push_str(&format!(
             r#"<tr>
   <td class="c-title"><div class="tt">{title}</div>{pack}</td>
   <td class="num">{size}</td>
-  <td class="num">{downloaded}</td>
-  <td class="num up">{uploaded}</td>
-  <td class="num">{ratio}{age}</td>
-  <td class="owed-cell {owed_class}">{owed_label}{owed_detail}</td>
+  <td class="owed-cell {owed_class}">{owed_label}</td>
   <td>{watched}</td>
   <td title="{verdict_full}">{verdict_short}<div class="note">{verdict_note}</div></td>
   <td class="actions">
@@ -417,16 +411,7 @@ fn render_rows(rows: &[DownloadRow]) -> String {
             title = html_escape(&row.title),
             owed_class = row.owed_class,
             owed_label = html_escape(&row.owed_label),
-            owed_detail = if row.owed_detail.is_empty() {
-                String::new()
-            } else {
-                format!("<div class=\"note\">{}</div>", html_escape(&row.owed_detail))
-            },
             size = html_escape(&row.size),
-            downloaded = html_escape(&row.downloaded),
-            uploaded = html_escape(&row.uploaded),
-            ratio = html_escape(&row.ratio),
-            age = age,
             watched = html_escape(&row.watched),
             verdict_full = html_escape(&row.verdict),
             verdict_short = html_escape(&row.verdict_short),
@@ -495,17 +480,13 @@ pub struct DownloadRow {
     /// Whether the tracker still wants seeding: "igen", "nem", or a question mark when the
     /// list has not been read. Three states rather than two, because an empty cell was being
     /// read as "nothing owed" when what it meant was "nobody has asked".
+    ///
+    /// The word only, with no duration under it: the debt is the torrent's, and the torrent's
+    /// own line carries how long it has left. Repeated on every file of a pack, the same number
+    /// stood in eight places and looked like eight separate obligations.
     pub owed_label: String,
     /// Which colour that is: red for owed, green for clear, grey for unknown.
     pub owed_class: &'static str,
-    /// The detail under it: how much seeding is left, or when the answer came from.
-    pub owed_detail: String,
-    /// What the tracker counted, each in its own column.
-    pub downloaded: String,
-    pub uploaded: String,
-    pub ratio: String,
-    /// How old those three figures are, shown once under the ratio rather than repeated.
-    pub figures_age: String,
     pub keep: bool,
     /// Why the sweep will or will not remove this.
     pub verdict: String,
@@ -1370,6 +1351,7 @@ mod tests {
             hash: "abc123".into(),
             title: "A hegyi doktor S19".into(),
             summary: "2 fájl, 1 megnézve, 964.42 MiB".into(),
+            figures: "letöltve 964.42 MiB · vissza 4.75 MiB · arány 0.005 (2 óra 0 perc)".into(),
             owed_label: "igen".into(),
             owed_class: "owed-yes",
             owed_detail: "még 36 óra 5 perc".into(),
@@ -1389,14 +1371,9 @@ mod tests {
             watched: "yes".into(),
             owed_label: "igen".into(),
             owed_class: "owed-yes",
-            owed_detail: "még 36 óra 5 perc".into(),
-            downloaded: "482.71 MiB".into(),
-            uploaded: "4.75 MiB".into(),
-            ratio: "0.000".into(),
-            figures_age: "2 hours 0 minutes ago".into(),
             keep,
-            verdict: "kept: the tracker still expects seeding".into(),
-            verdict_short: "seeding owed".into(),
+            verdict: "megtartva: ennek a fájlnak még hátravan a seedelése".into(),
+            verdict_short: "seedelés szükséges".into(),
         }
     }
 
@@ -1409,15 +1386,23 @@ mod tests {
             message: None,
         });
         assert!(html.contains("A hegyi doktor S19E08"));
-        assert!(html.contains("kept: the tracker still expects seeding"));
+        assert!(html.contains("megtartva: ennek a fájlnak még hátravan a seedelése"));
         // Its own cell, coloured by the answer: red still owes, green is clear, grey is
         // "we have not asked". The word is there as well, so the colour is not the only
         // thing carrying it.
         assert!(html.contains(r#"<td class="owed-cell owed-yes">igen"#));
-        assert!(html.contains("még 36 óra 5 perc"));
-        // Each figure in its own cell, so a column can be read down.
+        // The word on the file's row, the clock on the torrent's, once. A duration on every
+        // file of a pack was the same number in eight places, reading as eight obligations.
+        assert!(html.contains("még 36 óra 5 perc"), "the torrent's line carries the time");
+        assert_eq!(
+            html.matches("még 36 óra 5 perc").count(),
+            1,
+            "and only that line"
+        );
+        // The tracker's figures belong to the torrent, so they are on its line too.
+        assert!(html.contains("letöltve 964.42 MiB · vissza 4.75 MiB"));
+        // The file's own size stays with the file.
         assert!(html.contains(r#"<td class="num">482.71 MiB</td>"#));
-        assert!(html.contains(r#"<td class="num up">4.75 MiB</td>"#));
 
         // As many cells as the header has columns, or the table is misaligned.
         let header_cols = html.matches("<th").count();

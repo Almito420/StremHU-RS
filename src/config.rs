@@ -23,41 +23,23 @@ use tokio::sync::RwLock;
 /// machine. Nothing is written to the registry, to AppData or to a hidden per-user
 /// directory.
 ///
-/// Which folder that is depends on where the executable sits, and there are two shapes
-/// because there have to be. Windows resolves a program's libraries from the directory the
-/// program is in, so the executable and its dozen or so DLLs cannot be separated; the
-/// release therefore keeps them together in `bin`, and then the folder the user actually
-/// looks at is its parent. An executable anywhere else keeps that directory as the base,
-/// which is what an install made before this layout looks like, and it goes on working
-/// unchanged.
+/// It is the directory the executable sits in, and there is deliberately no rule that
+/// looks above it. Windows resolves a program's libraries from the program's own directory,
+/// so the executable and its dozen or so DLLs cannot be separated anyway; a `bin` folder
+/// would then hold both of them and the only thing gained would be one more level to
+/// explain. Everything the program generates goes in named folders inside this one instead.
 ///
 /// Resolved once. The fallback is the working directory, which only comes up if the
 /// executable's own path cannot be read.
 pub fn base_dir() -> PathBuf {
     static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     DIR.get_or_init(|| {
-        let dir = std::env::current_exe()
+        std::env::current_exe()
             .ok()
             .and_then(|exe| exe.parent().map(Path::to_path_buf))
-            .unwrap_or_else(|| PathBuf::from("."));
-        data_root_for(&dir)
+            .unwrap_or_else(|| PathBuf::from("."))
     })
     .clone()
-}
-
-/// The data root belonging to an executable directory: one level up out of `bin`.
-///
-/// A separate function so the rule is testable without moving the test binary, which is
-/// itself in a directory called `deps` and would otherwise decide the answer.
-fn data_root_for(exe_dir: &Path) -> PathBuf {
-    let in_bin = exe_dir
-        .file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(|n| n.eq_ignore_ascii_case("bin"));
-    match (in_bin, exe_dir.parent()) {
-        (true, Some(parent)) => parent.to_path_buf(),
-        _ => exe_dir.to_path_buf(),
-    }
 }
 
 /// A default path inside the install folder, with forward slashes so the config file
@@ -1123,38 +1105,6 @@ mod tests {
             Some(v) => unsafe { std::env::set_var("STREMHU_CONFIG", v) },
             None => unsafe { std::env::remove_var("STREMHU_CONFIG") },
         }
-    }
-
-    /// The release keeps the executable and its DLLs in `bin`, and everything the user
-    /// deals with one level up. An older install has the executable in the folder itself,
-    /// and that has to keep meaning what it meant, or a working server would come up
-    /// pointing at an empty state file next to a downloads folder full of films.
-    #[test]
-    fn the_data_root_climbs_out_of_bin_and_nowhere_else() {
-        assert_eq!(
-            data_root_for(Path::new("D:/stremhu-rs/bin")),
-            PathBuf::from("D:/stremhu-rs")
-        );
-        // Windows paths are case-insensitive, and a zip can be unpacked with any casing.
-        assert_eq!(
-            data_root_for(Path::new("D:/stremhu-rs/Bin")),
-            PathBuf::from("D:/stremhu-rs")
-        );
-        // The old layout: unchanged.
-        assert_eq!(
-            data_root_for(Path::new("D:/stremhu-rs")),
-            PathBuf::from("D:/stremhu-rs")
-        );
-        // Not one level up out of anything else. `target/release` in particular must not
-        // resolve to `target`, and a folder merely containing "bin" is not `bin`.
-        assert_eq!(
-            data_root_for(Path::new("D:/stremhu-rs/target/release")),
-            PathBuf::from("D:/stremhu-rs/target/release")
-        );
-        assert_eq!(
-            data_root_for(Path::new("D:/stremhu-rs/binaries")),
-            PathBuf::from("D:/stremhu-rs/binaries")
-        );
     }
 
     /// The generated files belong under `data`, so the install folder shows the four things
