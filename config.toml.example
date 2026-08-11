@@ -64,6 +64,7 @@ seed_safety_margin_hours = 6
 partial_requires_ratio_one = false
 space_saving = false
 sweep_on_start = true
+sweep_when_full = true
 notify_sweep = true
 notify_disk = true
 notify_problems = true

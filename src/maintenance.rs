@@ -146,6 +146,37 @@ pub trait World: Send + Sync {
     fn notify(&self, message: &str) -> impl Future<Output = ()> + Send;
 }
 
+/// The quiet period between two rounds triggered by a shortage of space.
+///
+/// A player that is refused retries, and each retry arrives as a fresh request: without this,
+/// one film nobody has room for would mean a tracker query and a full pass over the library
+/// several times a minute. Ten minutes is long enough that a retry storm costs one round, and
+/// short enough that a genuine second attempt later in the evening gets its own.
+pub const FULL_DISK_QUIET_SECONDS: u64 = 600;
+
+/// Whether a download that does not fit justifies a deletion round first.
+///
+/// `free` and `needed` are bytes on the folder the file would be written to, and
+/// `since_last_sweep` is how long ago any round last ran, in seconds.
+///
+/// The margin is `warn_below_free_bytes`, which means the round happens while there is still
+/// the owner's own reserve left rather than at the last possible byte. Filling a disk to
+/// within a few megabytes is what makes everything else on the machine start failing.
+pub fn sweep_before_download(
+    cfg: &crate::config::Maintenance,
+    free: u64,
+    needed: u64,
+    since_last_sweep: u64,
+) -> bool {
+    // Deletion switched off means nothing may be removed, whatever the reason. A round here
+    // would ask the tracker, work everything out, and be able to act on none of it.
+    if !cfg.sweep_when_full || !cfg.enable_deletion {
+        return false;
+    }
+    let wanted = needed.saturating_add(cfg.warn_below_free_bytes);
+    free < wanted && since_last_sweep >= FULL_DISK_QUIET_SECONDS
+}
+
 /// How far a run goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -518,6 +549,71 @@ fn file_age_secs(path: &std::path::Path, now: state::Unix) -> Option<u64> {
 mod tests {
     use super::*;
     use crate::config::Maintenance;
+
+    const GB: u64 = 1024 * 1024 * 1024;
+
+    /// The round before the download: it runs when the file plus the owner's own reserve does
+    /// not fit, and not otherwise.
+    #[test]
+    fn a_download_that_does_not_fit_asks_for_a_round_first() {
+        let cfg = Maintenance {
+            enable_deletion: true,
+            sweep_when_full: true,
+            warn_below_free_bytes: GB,
+            ..Default::default()
+        };
+        let long_ago = FULL_DISK_QUIET_SECONDS;
+
+        // 40 GiB free, a 50 GiB film: no.
+        assert!(sweep_before_download(&cfg, 40 * GB, 50 * GB, long_ago));
+        // 60 GiB free, the same film: room for it and for the reserve.
+        assert!(!sweep_before_download(&cfg, 60 * GB, 50 * GB, long_ago));
+        // Exactly the size of the film and nothing more. It would fit, and leave the disk with
+        // nothing at all, which is the state the reserve exists to prevent.
+        assert!(sweep_before_download(&cfg, 50 * GB, 50 * GB, long_ago));
+    }
+
+    /// Deletion switched off outranks it. A round then could not remove anything, and would
+    /// still cost a tracker query and a pass over the library.
+    #[test]
+    fn nothing_happens_while_deletion_is_off_or_the_setting_is_off() {
+        let base = Maintenance {
+            enable_deletion: true,
+            sweep_when_full: true,
+            warn_below_free_bytes: GB,
+            ..Default::default()
+        };
+        let short = (0, 50 * GB, FULL_DISK_QUIET_SECONDS);
+
+        assert!(sweep_before_download(&base, short.0, short.1, short.2));
+        assert!(!sweep_before_download(
+            &Maintenance { enable_deletion: false, ..base.clone() },
+            short.0,
+            short.1,
+            short.2
+        ));
+        assert!(!sweep_before_download(
+            &Maintenance { sweep_when_full: false, ..base.clone() },
+            short.0,
+            short.1,
+            short.2
+        ));
+    }
+
+    /// A refused stream is retried by the player, and every retry is a fresh request. One film
+    /// nobody has room for must cost one round, not one per retry.
+    #[test]
+    fn a_retrying_player_does_not_start_a_round_each_time() {
+        let cfg = Maintenance {
+            enable_deletion: true,
+            sweep_when_full: true,
+            warn_below_free_bytes: GB,
+            ..Default::default()
+        };
+        assert!(sweep_before_download(&cfg, 0, 50 * GB, FULL_DISK_QUIET_SECONDS));
+        assert!(!sweep_before_download(&cfg, 0, 50 * GB, FULL_DISK_QUIET_SECONDS - 1));
+        assert!(!sweep_before_download(&cfg, 0, 50 * GB, 0));
+    }
 
     struct Fake {
         notified: std::sync::Mutex<Vec<String>>,

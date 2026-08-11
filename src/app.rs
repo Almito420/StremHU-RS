@@ -122,6 +122,53 @@ impl crate::maintenance::World for ServerWorld {
     }
 }
 
+/// Frees room for a download that will not fit, before anything else is decided.
+///
+/// Returns whether a round ran. The caller does not need the answer, but a test does, and so
+/// does the log line that explains why a stream took a few seconds longer to start than usual.
+///
+/// The round is the ordinary one, with the ordinary rules: an obligation to the tracker still
+/// outranks free space, and a file being watched is still never touched. What this changes is
+/// only when it happens. Deleting in the evening what could have been deleted at noon is what
+/// pushes a download onto the second disk, or refuses it, while the first disk is full of files
+/// that had already served their time.
+pub(crate) async fn make_room_for(state: &Arc<AppState>, dir: &str, needed: u64) -> bool {
+    let cfg = state.config().await;
+    let Ok(space) = crate::disk::space_for(std::path::Path::new(dir)) else {
+        // Unreadable folder: the caller's own check reports that properly a moment later.
+        return false;
+    };
+    let since = crate::state::now().saturating_sub(state.store.last_sweep_at().await);
+    if !crate::maintenance::sweep_before_download(
+        &cfg.maintenance,
+        space.free_bytes,
+        needed,
+        since,
+    ) {
+        return false;
+    }
+
+    tracing::warn!(
+        folder = dir,
+        free = space.free_bytes,
+        needed,
+        "not enough room; running a deletion round before the download"
+    );
+    // Written down before the round rather than after, so a second request arriving while this
+    // one is still working the tracker does not start its own.
+    state.store.set_last_sweep_at(crate::state::now()).await;
+    let world = ServerWorld {
+        state: state.clone(),
+    };
+    crate::maintenance::run_once(
+        &world,
+        &state.store,
+        "Kevés a hely, takarítás a letöltés előtt",
+    )
+    .await;
+    true
+}
+
 impl AppState {
     /// A snapshot, so no handler holds the lock while doing network work.
     pub(crate) async fn config(&self) -> Config {

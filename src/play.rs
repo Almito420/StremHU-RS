@@ -137,10 +137,24 @@ pub(crate) async fn play(
     // however full the first one is: it would be written where the pack already lives, and the
     // failure would arrive as a write error from inside the engine rather than as an answer.
     // Asked here instead, against the folder that will really be used.
-    if let Some(existing) = match &parsed_hash {
+    let existing_dir = match &parsed_hash {
         Some(hash) => state.lib.save_dir_for(hash).await,
         None => None,
-    } {
+    };
+
+    // Before any of that: if this will not fit, clear up first. Falling over to the second disk
+    // or refusing the request are both answers to a full disk, and neither is the right one
+    // while the disk holds files that have already served their seeding time. For a torrent
+    // that is already here there is no second disk to fall over to, so this is the only answer
+    // there is.
+    if cfg.maintenance.sweep_when_full {
+        let target = existing_dir
+            .clone()
+            .unwrap_or_else(|| cfg.torrent.save_path.clone());
+        crate::app::make_room_for(&state, &target, needed).await;
+    }
+
+    if let Some(existing) = existing_dir {
         if let Err(e) = crate::disk::space_at_least(&existing, needed) {
             let message = format!("Nincs hely a torrent saját mappájában: {e}");
             tracing::error!("{message}");

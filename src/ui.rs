@@ -415,6 +415,8 @@ pub(crate) struct RetentionForm {
     #[serde(default)]
     sweep_on_start: Option<String>,
     #[serde(default)]
+    sweep_when_full: Option<String>,
+    #[serde(default)]
     space_saving: Option<String>,
     #[serde(default)]
     notify_sweep: Option<String>,
@@ -463,6 +465,7 @@ pub(crate) async fn ui_save_retention(
     m.require_watched = form.require_watched.is_some();
     m.enable_deletion = form.enable_deletion.is_some();
     m.sweep_on_start = form.sweep_on_start.is_some();
+    m.sweep_when_full = form.sweep_when_full.is_some();
     m.space_saving = form.space_saving.is_some();
     m.notify_sweep = form.notify_sweep.is_some();
     m.notify_disk = form.notify_disk.is_some();

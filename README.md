@@ -136,6 +136,21 @@ indul, és erről értesítés megy. Ha egyikbe se fér, a kérés tiszta hibáv
 írási hibájával. A mérés a letöltendő **fájl** méretére megy, nem a torrentére: egy 1.33 TiB-os
 csomagból egy 7 GB-os rész elfér oda, ahova a csomag nem.
 
+Ha egy letöltés nem fér el, **előbb fut egy törlési kör, és csak utána dől el, hova megy**
+(`maintenance.sweep_when_full`, pipálható, alapból be). A sorrend a lényeg: a másodlagos lemezre
+átcsúszás és az elutasítás is válasz egy tele lemezre, de egyik sem a helyes válasz akkor, amikor
+a lemez olyan fájlokkal van tele, amik a seedelési idejüket már leszolgálták és csak az estét
+várják. Ugyanaz a kör fut, ugyanazokkal a szabályokkal — a tracker felé fennálló kötelezettség itt
+is előbbre van a szabad helynél, és amit épp néznek, ahhoz itt sem nyúl —, csak nem estig vár vele.
+Egy már itt lévő torrentnél ez az egyetlen válasz, mert a libtorrent egy torrenthez egy mappát
+tart, tehát oda nincs átcsúszás.
+
+„Nem fér el" azt jelenti, hogy a fájl mellé a figyelmeztetési küszöb (`warn_below_free_bytes`) nem
+marad szabadon, tehát a kör akkor fut, amikor még van tartalék, nem az utolsó bájtnál. Egy
+elutasított streamet a lejátszó újrapróbál, és minden újrapróbálás önálló kérés, ezért két
+ilyen kör között tíz perc szünet van: egy film, aminek nincs helye, egy kört ér, nem
+újrapróbálásonként egyet.
+
 ### Előretöltés bájtban, nem piece-ben
 
 A piece méret kiadásonként 0.5 és 16 MiB között van, tehát egy fix piece-szám 4K-nál egy
@@ -398,6 +413,7 @@ Minden a `config.toml`-ban van, és a fontosabbak a felületről is állítható
 | `torrent.save_path_secondary` | ha az elsődleges mappa megtelt, ide ír |
 | `maintenance.space_saving` | helytakarékos mód |
 | `maintenance.sweep_at` / `sweep_on_start` | mikor fusson a törlés |
+| `maintenance.sweep_when_full` | ha egy letöltés nem fér el, előbb fusson egy kör |
 | `maintenance.notify_sweep` / `notify_disk` / `notify_problems` | miről jöjjön értesítés |
 | `maintenance.keep_seed_seconds` | tartalék, ha a trackertől nincs adat a torrentről |
 | `maintenance.cache_retention_seconds` | elhagyott `.torrent` fájlok megtartása |

@@ -94,6 +94,14 @@
     Automatikus törlés. Kikapcsolva soha semmi nem törlődik magától</label>
   <label class="check"><input type="checkbox" name="sweep_on_start"{{sweep_on_start}}>
     Induláskor is fusson egy kör, ne csak a megadott időben</label>
+  <label class="check"><input type="checkbox" name="sweep_when_full"{{sweep_when_full}}>
+    Ha egy letöltés nem fér el, előbb fusson egy kör, és csak utána dőljön el, hova megy</label>
+  <p class="note">Ugyanaz a kör, ugyanazokkal a szabályokkal: a tracker felé fennálló
+    kötelezettség itt is előbbre van a szabad helynél, és amit épp néznek, ahhoz itt sem nyúl. Az
+    egyetlen különbség, hogy nem estig vár vele. Nem fér el az annyit jelent, hogy a fájl mellé a
+    figyelmeztetési küszöb nem marad szabadon. Ára: ilyenkor a film indulása megvárja a tracker
+    kérdést és a törlést, pár másodperc — de csak akkor, amikor a másik lehetőség a másodlagos
+    lemez vagy egy elutasítás volt.</p>
   <label class="check"><input type="checkbox" name="space_saving"{{space_saving}}>
     Helytakarékos mód: egy megnézett fájl azonnal törölhető, csak az marad meg, amivel a
     torrent tovább tud seedelni</label>

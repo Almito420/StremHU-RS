@@ -583,6 +583,7 @@ pub struct RetentionView {
     pub require_watched: bool,
     pub enable_deletion: bool,
     pub sweep_on_start: bool,
+    pub sweep_when_full: bool,
     pub space_saving: bool,
     pub notify_sweep: bool,
     pub notify_disk: bool,
@@ -613,6 +614,7 @@ impl RetentionView {
             require_watched: m.require_watched,
             enable_deletion: m.enable_deletion,
             sweep_on_start: m.sweep_on_start,
+            sweep_when_full: m.sweep_when_full,
             space_saving: m.space_saving,
             notify_sweep: m.notify_sweep,
             notify_disk: m.notify_disk,
@@ -639,6 +641,7 @@ impl RetentionView {
             .replace("{{require_watched}}", checked(self.require_watched))
             .replace("{{enable_deletion}}", checked(self.enable_deletion))
             .replace("{{sweep_on_start}}", checked(self.sweep_on_start))
+            .replace("{{sweep_when_full}}", checked(self.sweep_when_full))
             .replace("{{space_saving}}", checked(self.space_saving))
             .replace("{{notify_sweep}}", checked(self.notify_sweep))
             .replace("{{notify_disk}}", checked(self.notify_disk))
@@ -1195,6 +1198,7 @@ mod tests {
             "require_watched",
             "enable_deletion",
             "sweep_on_start",
+            "sweep_when_full",
             "space_saving",
             "notify_sweep",
             "notify_disk",

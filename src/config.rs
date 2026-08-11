@@ -418,6 +418,22 @@ pub struct Maintenance {
     pub space_saving: bool,
     /// Run a deletion round shortly after starting, not only at the appointed time.
     pub sweep_on_start: bool,
+    /// When a download will not fit, clear up first and then decide where it goes.
+    ///
+    /// The order matters and it is the point of this setting. Without it a download that does
+    /// not fit on the primary disk goes to the secondary, and if it fits nowhere the request is
+    /// refused: both of those happen while the disk may be full of files that have already
+    /// served their seeding time and are only waiting for the evening. With it, that round
+    /// happens now, and the ordinary decision is then made about a disk that has room.
+    ///
+    /// "Will not fit" means the file plus `warn_below_free_bytes` on top, so the threshold that
+    /// is already set for the warning is what counts as running out here too. Nothing extra is
+    /// deleted for it: the round is the same one, with the same rules, and an obligation to the
+    /// tracker still outranks free space. If `enable_deletion` is off, nothing happens at all.
+    ///
+    /// The cost is that starting a film can wait for a tracker query and a deletion, a few
+    /// seconds, and only in the case where the alternative was the other disk or a refusal.
+    pub sweep_when_full: bool,
     /// Which events are worth a push. Everything is in the log and the interface regardless.
     pub notify_sweep: bool,
     pub notify_disk: bool,
@@ -447,6 +463,9 @@ impl Default for Maintenance {
             partial_requires_ratio_one: false,
             space_saving: false,
             sweep_on_start: true,
+            // On: it only ever runs the round that was going to run anyway, a few hours
+            // earlier, at the one moment when the room it frees is actually needed.
+            sweep_when_full: true,
             notify_sweep: true,
             notify_disk: true,
             notify_problems: true,
