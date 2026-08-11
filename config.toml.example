@@ -44,6 +44,7 @@ base_deadline_ms = 2000
 deadline_step_ms = 1000
 pin_file_edges = true
 idle_priority = 4
+partial_download = false
 
 [maintenance]
 hit_and_run = true

@@ -171,10 +171,19 @@
              value="{{warn_below_free_percent}}">
     </div>
   </div>
+  <label class="check"><input type="checkbox" name="partial_download"{{partial_download}}>
+    Részleges letöltés: csak azt töltse le, amit meg is nézünk</label>
+  <p class="note">Kikapcsolva a fájl végig letöltődik: a lejátszási fej előtti ablak megy
+    elsőként, a maradék utána, alacsony prioritással. Bekapcsolva semmi nem töltődik előre,
+    csak a lejátszási fej előtti ablak, és amikor megáll a lejátszás, ott áll meg a letöltés
+    is. Húsz perc után kilépve húsz perc van a lemezen. Az eredeti StremHU így működik.</p>
+  <p class="note">Amit vállalsz vele: az nCore a be nem fejezett letöltést nem seedelési idő
+    szerint, hanem arány szerint nézi, és amit nem húztunk le egészen, azt nem is tudjuk
+    egészben visszatölteni. Ezért van alapból kikapcsolva.</p>
   <button type="submit">Mentés</button>
   <p class="note">A streamre eső kapcsolatszám azonnal érvényes. Az összesített korlát és
     az aktív torrentek száma a következő indításnál lép életbe, mert ezeket a motor
-    induláskor kapja meg.</p>
+    induláskor kapja meg. A részleges letöltés a következő megnyitott fájlnál érvényes.</p>
 </form>
 
 <form method="post" action="/ui/save-toml" class="card">

@@ -26,6 +26,7 @@ pub async fn serve() -> Result<()> {
     let path = Config::path_from_env();
     let mut cfg = Config::load(&path)?;
     cfg.apply_env_overrides();
+    cfg.prepare_layout();
 
     // A key is required: the stream URLs are unauthenticated apart from this, and an
     // empty one would leave the server open to anyone who can reach the port.

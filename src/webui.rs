@@ -662,10 +662,15 @@ pub struct EngineView {
     pub connections_while_streaming: u32,
     pub warn_below_free_gb: u64,
     pub warn_below_free_percent: u64,
+    pub partial_download: bool,
 }
 
 impl EngineView {
-    pub fn new(t: &crate::config::Torrent, m: &crate::config::Maintenance) -> Self {
+    pub fn new(
+        t: &crate::config::Torrent,
+        m: &crate::config::Maintenance,
+        p: &crate::config::Pieces,
+    ) -> Self {
         Self {
             max_active_torrents: t.max_active_torrents,
             complete_extras_below_mb: t.complete_extras_below_bytes / (1024 * 1024),
@@ -675,6 +680,7 @@ impl EngineView {
             // nothing at all.
             warn_below_free_gb: m.warn_below_free_bytes.div_ceil(1024 * 1024 * 1024),
             warn_below_free_percent: m.warn_below_free_percent,
+            partial_download: p.partial_download,
         }
     }
 
@@ -704,6 +710,7 @@ impl EngineView {
                 "{{warn_below_free_percent}}",
                 &self.warn_below_free_percent.to_string(),
             )
+            .replace("{{partial_download}}", checked(self.partial_download))
     }
 }
 
@@ -1100,6 +1107,7 @@ mod tests {
         EngineView::new(
             &crate::config::Torrent::default(),
             &crate::config::Maintenance::default(),
+            &crate::config::Pieces::default(),
         )
     }
 
@@ -1198,6 +1206,7 @@ mod tests {
             "connections_while_streaming",
             "warn_below_free_gb",
             "warn_below_free_percent",
+            "partial_download",
             // save-toml
             "toml",
         ];
@@ -1227,6 +1236,33 @@ mod tests {
         assert!(html.contains(r#"name="warn_below_free_gb" type="number" min="1" max="10000""#));
         assert!(html.contains(r#"value="1""#), "the threshold shows in gibibytes");
         assert!(!html.contains("{{"), "unsubstituted placeholder left in the page");
+        // Off by default, and the box has to show that rather than the other way round: a
+        // checkbox drawn ticked while the setting is off turns itself on at the next save.
+        assert!(
+            html.contains(r#"name="partial_download">"#),
+            "partial download must be unticked when it is off"
+        );
+    }
+
+    /// And ticked when it is on, or the page would be lying about a setting that changes how
+    /// much of a film ends up on the disk.
+    #[test]
+    fn partial_download_shows_as_ticked_when_it_is_on() {
+        let html = page(PageState::Settings {
+            toml_text: String::new(),
+            message: None,
+            network: network_view(),
+            engine: EngineView::new(
+                &crate::config::Torrent::default(),
+                &crate::config::Maintenance::default(),
+                &crate::config::Pieces {
+                    partial_download: true,
+                    ..Default::default()
+                },
+            ),
+            retention: retention_view(),
+        });
+        assert!(html.contains(r#"name="partial_download" checked>"#));
     }
 
     /// Bytes to gibibytes and back has to survive the round trip, and a threshold set below
@@ -1234,14 +1270,21 @@ mod tests {
     #[test]
     fn the_free_space_threshold_round_trips_through_gibibytes() {
         let mut m = crate::config::Maintenance::default();
-        assert_eq!(EngineView::new(&crate::config::Torrent::default(), &m).warn_below_free_gb, 1);
+        let p = crate::config::Pieces::default();
+        assert_eq!(
+            EngineView::new(&crate::config::Torrent::default(), &m, &p).warn_below_free_gb,
+            1
+        );
 
         m.warn_below_free_bytes = 50 * 1024 * 1024 * 1024;
-        assert_eq!(EngineView::new(&crate::config::Torrent::default(), &m).warn_below_free_gb, 50);
+        assert_eq!(
+            EngineView::new(&crate::config::Torrent::default(), &m, &p).warn_below_free_gb,
+            50
+        );
 
         m.warn_below_free_bytes = 100 * 1024 * 1024;
         assert_eq!(
-            EngineView::new(&crate::config::Torrent::default(), &m).warn_below_free_gb,
+            EngineView::new(&crate::config::Torrent::default(), &m, &p).warn_below_free_gb,
             1,
             "rounded up, never to zero"
         );

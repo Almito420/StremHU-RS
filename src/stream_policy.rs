@@ -72,6 +72,40 @@ pub fn prefetch_for_piece_size(piece_size: u64, readahead_bytes: u64) -> u32 {
     pieces.clamp(4, u32::MAX as u64) as u32
 }
 
+/// What a torrent should be asked for at the moment a file is opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wanted {
+    /// Every file in the torrent, at this priority. For a tracker that judges a download
+    /// by the whole torrent rather than by what was taken from it.
+    Everything(u8),
+    /// Nothing in advance. Only a deadline raises a piece, so only what is played arrives.
+    OnlyWhatIsPlayed,
+    /// This file whole, every other file switched off.
+    OnlyThisFile,
+    /// This file as well, leaving alone whatever the torrent is already serving.
+    AlsoThisFile,
+}
+
+/// The order the three settings resolve in when a file is opened.
+///
+/// `full` is the tracker's demand and outranks everything: if the whole torrent has to be
+/// downloaded then no saving is allowed to interfere. `partial` comes next, because "fetch
+/// only what is played" is a statement about pieces and applies whether or not a sibling
+/// episode is open — the sibling's own deadlines keep its window alive. Only when neither is
+/// set does it matter whether this is the first file out of the torrent.
+pub fn wanted_at_open(full: bool, partial: bool, siblings: usize, idle_priority: u8) -> Wanted {
+    if full {
+        // Zero would mean the torrent never finishes, which is the opposite of the request.
+        Wanted::Everything(idle_priority.max(1))
+    } else if partial {
+        Wanted::OnlyWhatIsPlayed
+    } else if siblings == 0 {
+        Wanted::OnlyThisFile
+    } else {
+        Wanted::AlsoThisFile
+    }
+}
+
 /// Which other files of the torrent are worth picking up once the wanted one is on disk.
 ///
 /// `sizes` is every file's length, `skip` the files already being served, and `limit` the
@@ -248,6 +282,33 @@ pub fn max_connections(streaming: bool, while_streaming: u32, while_idle: u32) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The precedence of the three settings, which is the whole of this decision.
+    #[test]
+    fn the_trackers_demand_outranks_every_saving() {
+        // Full download on: nothing else may reduce what is fetched, partial download included.
+        assert_eq!(wanted_at_open(true, true, 0, 4), Wanted::Everything(4));
+        assert_eq!(wanted_at_open(true, false, 3, 4), Wanted::Everything(4));
+        // Priority zero would mean the torrent never finishes, which is not what "download the
+        // whole thing" can be allowed to mean.
+        assert_eq!(wanted_at_open(true, false, 0, 0), Wanted::Everything(1));
+    }
+
+    #[test]
+    fn partial_download_applies_whether_or_not_a_sibling_is_open() {
+        assert_eq!(wanted_at_open(false, true, 0, 4), Wanted::OnlyWhatIsPlayed);
+        // A second episode of the same pack does not change it: that episode's own deadlines
+        // keep its window wanted, and nothing else is supposed to be.
+        assert_eq!(wanted_at_open(false, true, 2, 4), Wanted::OnlyWhatIsPlayed);
+    }
+
+    /// The ordinary case, unchanged: the first file out of a torrent switches the rest off, a
+    /// later one is added without disturbing what is already being served.
+    #[test]
+    fn without_either_setting_it_depends_on_the_siblings() {
+        assert_eq!(wanted_at_open(false, false, 0, 4), Wanted::OnlyThisFile);
+        assert_eq!(wanted_at_open(false, false, 1, 4), Wanted::AlsoThisFile);
+    }
 
     /// The case this was written for, measured from the real torrent: a film, a sample and an
     /// nfo, where leaving the last two out is what kept the tracker reporting 98.94%.

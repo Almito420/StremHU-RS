@@ -16,24 +16,48 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-/// The folder the program keeps everything in: the one the executable sits in.
+/// The folder the program keeps everything in.
 ///
-/// The install is then one folder. Copy it elsewhere and it takes its downloads, its
-/// records and its certificate with it; delete it and nothing is left behind anywhere
-/// else on the machine. Nothing is written to the registry, to AppData or to a
-/// hidden per-user directory.
+/// The install is one folder. Copy it elsewhere and it takes its downloads, its records
+/// and its certificate with it; delete it and nothing is left behind anywhere else on the
+/// machine. Nothing is written to the registry, to AppData or to a hidden per-user
+/// directory.
+///
+/// Which folder that is depends on where the executable sits, and there are two shapes
+/// because there have to be. Windows resolves a program's libraries from the directory the
+/// program is in, so the executable and its dozen or so DLLs cannot be separated; the
+/// release therefore keeps them together in `bin`, and then the folder the user actually
+/// looks at is its parent. An executable anywhere else keeps that directory as the base,
+/// which is what an install made before this layout looks like, and it goes on working
+/// unchanged.
 ///
 /// Resolved once. The fallback is the working directory, which only comes up if the
 /// executable's own path cannot be read.
 pub fn base_dir() -> PathBuf {
     static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     DIR.get_or_init(|| {
-        std::env::current_exe()
+        let dir = std::env::current_exe()
             .ok()
             .and_then(|exe| exe.parent().map(Path::to_path_buf))
-            .unwrap_or_else(|| PathBuf::from("."))
+            .unwrap_or_else(|| PathBuf::from("."));
+        data_root_for(&dir)
     })
     .clone()
+}
+
+/// The data root belonging to an executable directory: one level up out of `bin`.
+///
+/// A separate function so the rule is testable without moving the test binary, which is
+/// itself in a directory called `deps` and would otherwise decide the answer.
+fn data_root_for(exe_dir: &Path) -> PathBuf {
+    let in_bin = exe_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.eq_ignore_ascii_case("bin"));
+    match (in_bin, exe_dir.parent()) {
+        (true, Some(parent)) => parent.to_path_buf(),
+        _ => exe_dir.to_path_buf(),
+    }
 }
 
 /// A default path inside the install folder, with forward slashes so the config file
@@ -117,8 +141,8 @@ pub struct Storage {
 impl Default for Storage {
     fn default() -> Self {
         Self {
-            state_path: in_base("state.json"),
-            torrent_files_dir: in_base("torrents"),
+            state_path: in_base("data/state.json"),
+            torrent_files_dir: in_base("data/torrents"),
             flush_interval_secs: 15,
             resume_save_interval_secs: 60,
         }
@@ -250,6 +274,21 @@ pub struct Pieces {
 
     /// Priority for the selected file's pieces. Zero would mean it never completes.
     pub idle_priority: u8,
+
+    /// Fetch only the parts actually played, and stop when playback stops.
+    ///
+    /// Off, a film is downloaded whole: the deadlines pull the playhead's window first, and
+    /// the rest of the file follows behind at a low priority. On, nothing is wanted in
+    /// advance — every piece sits at "do not download" and only a deadline raises it, which
+    /// is exactly the window in front of the viewer. Stop watching after twenty minutes and
+    /// twenty minutes is what is on the disk.
+    ///
+    /// This is how the original works, and it is off by default here for one reason: on
+    /// nCore an unfinished download is not judged by seeding time but by ratio, and a file
+    /// that was never completed cannot be seeded back in full. The saving is real, the
+    /// obligation it leaves behind is a different one, so it is a decision rather than a
+    /// default. See `maintenance.partial_requires_ratio_one`.
+    pub partial_download: bool,
 }
 
 impl Default for Pieces {
@@ -264,6 +303,7 @@ impl Default for Pieces {
             deadline_step_ms: 1000,
             pin_file_edges: true,
             idle_priority: 4,
+            partial_download: false,
         }
     }
 }
@@ -790,7 +830,7 @@ impl Default for Network {
             cert_domain: "local-ip.medicmobile.org".into(),
             cert_provider_url: "https://local-ip.medicmobile.org/keys".into(),
             cert_key_url: String::new(),
-            cert_cache_dir: in_base("certs"),
+            cert_cache_dir: in_base("data/certs"),
             cert_renew_margin_days: 21,
             reverse_proxy_domain: String::new(),
         }
@@ -853,6 +893,40 @@ impl Config {
             .with_context(|| format!("parsing {}", path.display()))?;
         tracing::info!(path = %path.display(), "config loaded");
         Ok(cfg)
+    }
+
+    /// Creates the folders this configuration is going to write into.
+    ///
+    /// Everything here is also created on demand by whichever part needs it, so this is not
+    /// what makes the program work. What it makes is a first run that leaves behind a folder
+    /// somebody can look at and understand: `data`, `downloads` and `logs` are there from the
+    /// start rather than appearing one at a time as each feature is first used, and a folder
+    /// that cannot be created is then a message at startup instead of a puzzle three hours
+    /// later when the first file finishes.
+    ///
+    /// Failures are reported and not fatal. A missing log folder must not stop a server that
+    /// is otherwise able to run, and the secondary download folder in particular may well be
+    /// on a disk that is not plugged in.
+    pub fn prepare_layout(&self) {
+        let mut dirs: Vec<PathBuf> = vec![
+            PathBuf::from(&self.torrent.save_path),
+            PathBuf::from(&self.storage.torrent_files_dir),
+            PathBuf::from(&self.network.cert_cache_dir),
+            base_dir().join("logs"),
+        ];
+        if let Some(parent) = Path::new(&self.storage.state_path).parent() {
+            if !parent.as_os_str().is_empty() {
+                dirs.push(parent.to_path_buf());
+            }
+        }
+        for dir in dirs {
+            if dir.is_dir() {
+                continue;
+            }
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                tracing::warn!(path = %dir.display(), error = %e, "cannot create this folder");
+            }
+        }
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -967,6 +1041,56 @@ mod tests {
         }
     }
 
+    /// The release keeps the executable and its DLLs in `bin`, and everything the user
+    /// deals with one level up. An older install has the executable in the folder itself,
+    /// and that has to keep meaning what it meant, or a working server would come up
+    /// pointing at an empty state file next to a downloads folder full of films.
+    #[test]
+    fn the_data_root_climbs_out_of_bin_and_nowhere_else() {
+        assert_eq!(
+            data_root_for(Path::new("D:/stremhu-rs/bin")),
+            PathBuf::from("D:/stremhu-rs")
+        );
+        // Windows paths are case-insensitive, and a zip can be unpacked with any casing.
+        assert_eq!(
+            data_root_for(Path::new("D:/stremhu-rs/Bin")),
+            PathBuf::from("D:/stremhu-rs")
+        );
+        // The old layout: unchanged.
+        assert_eq!(
+            data_root_for(Path::new("D:/stremhu-rs")),
+            PathBuf::from("D:/stremhu-rs")
+        );
+        // Not one level up out of anything else. `target/release` in particular must not
+        // resolve to `target`, and a folder merely containing "bin" is not `bin`.
+        assert_eq!(
+            data_root_for(Path::new("D:/stremhu-rs/target/release")),
+            PathBuf::from("D:/stremhu-rs/target/release")
+        );
+        assert_eq!(
+            data_root_for(Path::new("D:/stremhu-rs/binaries")),
+            PathBuf::from("D:/stremhu-rs/binaries")
+        );
+    }
+
+    /// The generated files belong under `data`, so the install folder shows the four things
+    /// that matter and not a dozen loose files.
+    #[test]
+    fn the_defaults_put_the_generated_files_where_the_layout_says() {
+        let cfg = Config::default();
+        for (what, path) in [
+            ("state", &cfg.storage.state_path),
+            ("torrents", &cfg.storage.torrent_files_dir),
+            ("certs", &cfg.network.cert_cache_dir),
+        ] {
+            assert!(
+                path.contains("/data/"),
+                "{what} should be under data/, it is at {path}"
+            );
+        }
+        assert!(cfg.torrent.save_path.ends_with("/downloads"));
+    }
+
     #[test]
     fn defaults_round_trip_through_toml() {
         let cfg = Config::default();
@@ -1007,6 +1131,22 @@ mod tests {
     fn the_selected_file_downloads_in_full_by_default() {
         let p = Config::default().pieces;
         assert!(p.idle_priority > 0, "priority zero would never complete");
+        assert!(
+            !p.partial_download,
+            "partial download leaves a ratio obligation, so it has to be chosen on purpose"
+        );
+    }
+
+    /// The switch has to survive the file, or turning it on in the interface would last
+    /// until the next restart and then quietly stop applying.
+    #[test]
+    fn partial_download_survives_the_config_file() {
+        let text = "[pieces]\npartial_download = true\n";
+        let cfg: Config = toml::from_str(text).expect("parses");
+        assert!(cfg.pieces.partial_download);
+        let back: Config =
+            toml::from_str(&toml::to_string_pretty(&cfg).expect("serialises")).expect("parses");
+        assert!(back.pieces.partial_download);
     }
 
     /// A default that names a quality the media table does not know would order

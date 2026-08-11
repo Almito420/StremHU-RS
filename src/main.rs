@@ -71,9 +71,13 @@ fn has_console() -> bool {
     true
 }
 
-/// Where the log goes when there is no console. Beside the executable, with everything else.
+/// Where the log goes when there is no console.
+///
+/// In `logs`, beside the rotated one, rather than loose in the install folder: two files
+/// whose names differ only by an extension are exactly what a folder somebody has to look
+/// through does not need.
 fn log_file_path() -> std::path::PathBuf {
-    config::base_dir().join("stremhu-rs.log")
+    config::base_dir().join("logs").join("stremhu-rs.log")
 }
 
 static LOG_FILE: std::sync::OnceLock<std::sync::Mutex<std::fs::File>> = std::sync::OnceLock::new();
@@ -115,6 +119,11 @@ impl std::io::Write for FileLog {
 fn open_log_file() -> Option<std::fs::File> {
     const MAX_BYTES: u64 = 4 * 1024 * 1024;
     let path = log_file_path();
+    // The folder may not exist yet: logging is set up before the configuration is read, so
+    // this can be the first thing the program writes anywhere.
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > MAX_BYTES {
         let _ = std::fs::rename(&path, path.with_extension("log.old"));
     }

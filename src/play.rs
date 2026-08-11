@@ -214,8 +214,10 @@ pub(crate) async fn play(
             file_index: entry.selected,
             // More than one file in the torrent and only one of them selected: the
             // torrent will never be a complete seed, which matters when deciding whether
-            // the tracker's obligation for it can ever clear.
-            partial: entry.files.len() > 1 && !cfg.ncore.requires_full_download,
+            // the tracker's obligation for it can ever clear. Partial download means the
+            // same thing for a different reason — not even the one file is finished.
+            partial: cfg.pieces.partial_download
+                || (entry.files.len() > 1 && !cfg.ncore.requires_full_download),
             file_len: entry.file_len,
             save_path: entry.file_path.to_string_lossy().to_string(),
             torrent_file,

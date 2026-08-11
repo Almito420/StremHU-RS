@@ -53,7 +53,7 @@ pub(crate) async fn settings_page(state: &AppState, message: Option<String>) -> 
     html(crate::webui::page(crate::webui::PageState::Settings {
         toml_text,
         message,
-        engine: crate::webui::EngineView::new(&cfg.torrent, &cfg.maintenance),
+        engine: crate::webui::EngineView::new(&cfg.torrent, &cfg.maintenance, &cfg.pieces),
         retention: crate::webui::RetentionView::new(&cfg.maintenance, &last_sweep),
         network: network_view(state, &cfg).await,
     }))
@@ -577,6 +577,8 @@ pub(crate) struct EngineForm {
     warn_below_free_gb: String,
     #[serde(default)]
     warn_below_free_percent: String,
+    #[serde(default)]
+    partial_download: Option<String>,
 }
 
 pub(crate) async fn ui_save_engine(
@@ -617,6 +619,8 @@ pub(crate) async fn ui_save_engine(
     // than the file being watched is the wrong way round.
     t.connections_while_idle = t.connections_while_idle.min(t.connections_while_streaming);
 
+    cfg.pieces.partial_download = form.partial_download.is_some();
+
     let m = &mut cfg.maintenance;
     let current_gb = m.warn_below_free_bytes.div_ceil(1024 * 1024 * 1024);
     let gb = crate::webui::count_or_current(
@@ -637,10 +641,15 @@ pub(crate) async fn ui_save_engine(
         -1 => "korlátlan".to_string(),
         n => format!("{n} db"),
     };
+    let letoltes = if cfg.pieces.partial_download {
+        "csak a lejátszott rész"
+    } else {
+        "a teljes fájl"
+    };
     let summary = format!(
         "Mentve. Aktív torrentek: {active}, kapcsolatok: {} összesen és {} egy streamre, \
-         figyelmeztetés {} GiB vagy {}% szabad hely alatt. A kapcsolatszámok újraindulás \
-         után lépnek életbe.",
+         figyelmeztetés {} GiB vagy {}% szabad hely alatt, letöltés: {letoltes}. A \
+         kapcsolatszámok újraindulás után lépnek életbe.",
         cfg.torrent.global_connections_limit,
         cfg.torrent.connections_while_streaming,
         cfg.maintenance.warn_below_free_bytes / (1024 * 1024 * 1024),
@@ -717,7 +726,7 @@ pub(crate) async fn ui_save_toml(
             return html(crate::webui::page(crate::webui::PageState::Settings {
                 toml_text: form.toml,
                 message: Some(format!("Nem mentettük el: {e}")),
-                engine: crate::webui::EngineView::new(&saved.torrent, &saved.maintenance),
+                engine: crate::webui::EngineView::new(&saved.torrent, &saved.maintenance, &saved.pieces),
                 retention: crate::webui::RetentionView::from_config(&saved.maintenance),
                 network,
             }));

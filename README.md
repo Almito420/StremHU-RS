@@ -1,8 +1,9 @@
 # stremhu-rs
 
 Stremio addon, ami az [nCore](https://ncore.pro) torrentjeit streameli, letöltés bevárása
-nélkül. Egy önálló Windows program: nincs Docker, nincs adatbázis, nincs külön torrent
-kliens. A torrentmotor beágyazott **libtorrent 2.0.11**.
+nélkül. Egy önálló program: nincs Docker, nincs adatbázis, nincs külön torrent kliens. A
+torrentmotor beágyazott **libtorrent 2.0.11** (Windows), illetve a disztribúció libtorrentje
+Linuxon. Windowsra és Linuxra is van kész kiadás, [lásd lentebb](#linux).
 
 Amit megnyomsz a Stremióban, az néhány másodperc alatt indul, közben a fájl a háttérben
 végig letöltődik, utána seedel, és amikor a seedelési kötelezettségét letudta, magától
@@ -12,7 +13,7 @@ törlődik. Egy évadcsomagból **csak azt az egy részt** hozza le, amit megné
 
 ## Eredet és licenc
 
-Ez a program a **StremHU** újraírása Rustban, Windowsra.
+Ez a program a **StremHU** újraírása Rustban, elsősorban Windowsra, de Linuxon is fut.
 
 **Eredeti projekt: <https://github.com/s4pp1/stremhu-source>** — szerzője **s4pp1**, licence
 **GPL-3.0**. Konténerképe a Docker Hubon `s4pp1/stremhu-source` néven érhető el, és több
@@ -40,7 +41,7 @@ egy trackerrel.
 
 | | StremHU (eredeti) | stremhu-rs |
 |---|---|---|
-| futtatás | Python, Docker, FastAPI | egyetlen Windows exe, ablak nélkül |
+| futtatás | Python, Docker, FastAPI | egyetlen bináris: Windowson ablak nélkül, Linuxon systemd alatt |
 | adattárolás | SQLite + Alembic migrációk | egy JSON fájl, kézzel is olvasható |
 | torrentmotor | python-libtorrent | libtorrent 2.0.11 beágyazva, C ABI shimen keresztül |
 | trackerek | nCore, FileList, BitHumen, HunTorrent, Insane, Majomparade | csak nCore |
@@ -70,6 +71,23 @@ prioritást (`file_priority`), tehát végig letöltődik és utána seedelhető
 nulla prioritáson marad. A minta és az nfo utólag jön le, ha **kicsi önmagában és a kért fájlhoz
 képest is** — az utóbbi feltétel nélkül egy XviD sorozatcsomag minden 346 MB-os része
 kísérőfájlnak számított, és 22 fájl jött le egy rész kiszolgálásához.
+
+### Részleges letöltés
+
+Az eredeti másik üzemmódja is megvan, `pieces.partial_download`, a felületen pipálható,
+**alapból kikapcsolva**. Bekapcsolva egyetlen piece sincs kérve előre: minden nulla prioritáson
+áll, és csak a `set_piece_deadline` emeli meg azt az ablakot, ami a lejátszási fej előtt van. Aki
+húsz perc után kilép, annak húsz perc van a lemezén.
+
+Két dolog kell hozzá azon túl, amit az eredeti csinál. A deadline visszavonása a libtorrentben
+**nem** állítja vissza a nulla prioritást (`reset_piece_deadline` csak a határidőt törli), tehát a
+lejátszás vége után a már megemelt piece-ek tovább töltődtek volna: a stream leállásakor a program
+visszateszi az egészet nullára. Indításkor pedig kell egy announce, mert amíg semmi nincs kérve,
+a torrent teljes seednek számít, és a tracker egy seedernek nem ad peert.
+
+Amit vállalsz vele: az nCore a be nem fejezett letöltést nem seedelési idő, hanem **arány**
+szerint nézi, és amit nem húztunk le egészen, azt nem is tudjuk egészben visszatölteni. A
+takarékosság valódi, a kötelezettség viszont másfajta lesz, ezért ez döntés és nem alapérték.
 
 ### Megnézettség: mérve, nem feltételezve
 
@@ -136,6 +154,22 @@ másodperc alatti puffert adott, és a stream pár másodperc után megállt. It
 - **a tartalomtípus a fájl kiterjesztéséből** jön. Egy `.avi` fájlt Matroskaként hirdetni annyi,
   hogy a lejátszó szó nélkül feladja.
 
+### Sorrend a stream listában
+
+Az eredetiben felhasználónkénti preferenciák és kizárások vannak, adatbázisban
+(`preference_definitions`, `attribute_exclusions`). Itt három sorrend a konfigban — nyelv,
+felbontás, forrás — és egy negyedik beállítás arról, hogy melyik a fontosabb, ha ütköznek
+(`filters.priority`, alapból a nyelv). Ami nincs felsorolva, az nem tűnik el, csak a felsoroltak
+után jön: egy preferencia nem szűrő. Szűrni egyedül a `min_seeders` szűr.
+
+### Felület
+
+Az eredeti egy több oldalas admin felület. Ez egy oldal beállításokból és egy oldal
+letöltésekből, magyarul. A letöltések oldalon **egy sor egy torrent**, kinyitva a fájljai, mert egy
+sorozatcsomag nyolc fájlja nyolc sorként azt a látszatot adta, hogy nyolc torrent van. A
+megnézettség oszlop háromféle értéket vehet fel: `megnézve`, `nem indult el`, vagy százalék — se
+külön státuszok, se találgatás.
+
 ### Üzemeltetés
 
 - **ablak nélküli program.** Naplózás csak `--log` esetén; ha nem tud elindulni, azt mindig
@@ -161,22 +195,38 @@ másodperc alatti puffert adott, és a stream pár másodperc után megállt. It
 
 ## Indulás nulláról
 
-1. Töltsd le a [kiadás](../../releases) zipjét, és csomagold ki egy mappába, például
-   `D:\stremhu-rs`.
-2. Indítsd el a `stremhu-rs.exe`-t. **Nem nyílik ablak**: ez egy szerver, ami a háttérben fut.
+1. Töltsd le a [kiadás](../../releases) Windows zipjét, és csomagold ki egy mappába, például
+   `D:\stremhu-rs`. A zipben egyetlen `bin` mappa van, semmi más.
+2. Indítsd el a `bin\stremhu-rs.exe`-t. **Nem nyílik ablak**: ez egy szerver, ami a háttérben fut.
 3. Nyisd meg: <http://localhost:3080/ui>
 4. Adj meg egy admin jelszót, aztán az nCore fiókot és a TMDB kulcsot.
 5. A lap kiírja az **addon URL-t**. Ezt illeszd be a Stremióba.
 
-Az első indításnál a program ezt hozza létre az exe mellé:
+### Mappastruktúra
+
+A kiadásban csak a `bin` van; a többit a program az első indításnál maga hozza létre, egy
+szinttel a `bin` fölött:
 
 ```
-config.toml        a beállítások, alapértékekkel kitöltve
-state.json         mi van a lemezen, mit néztünk meg
-downloads\         ide jönnek a fájlok
-torrents\          a .torrent és a folytatási (resume) adatok
-certs\             a HTTPS tanúsítvány, magától letöltve
+stremhu-rs\
+  bin\             a program és a DLL-jei, ehhez nem kell hozzányúlni
+  config.toml      a beállítások, alapértékekkel kitöltve
+  data\
+    state.json     mi van a lemezen, mit néztünk meg
+    torrents\      a .torrent és a folytatási (resume) adatok
+    certs\         a HTTPS tanúsítvány, magától letöltve
+  downloads\       ide jönnek a fájlok
+  logs\            napló, ha --log paraméterrel indul
 ```
+
+A DLL-ek azért vannak a program mellett és nem külön mappában, mert a Windows a betöltendő
+könyvtárakat a futtatható fájl saját mappájából oldja fel: kettéválasztani őket csak úgy
+lehetne, hogy a program indulás előtt nem tud elindulni. Így viszont egy mappa van, amiben
+nem kell keresni semmit, és a gyökérben csak az van, amihez a felhasználónak köze van.
+
+A program a `bin` mappát felismeri, és eggyel feljebb dolgozik. Ha a futtatható fájl **nem**
+`bin`-ben van, akkor a saját mappája a gyökér: egy korábbi, lapos telepítés ezért változatlanul
+működik tovább, nem kell átrendezni.
 
 Semmi más: se registry, se AppData, se rejtett mappa. A mappa egészben másolható, mozgatható,
 törölhető.
@@ -205,6 +255,11 @@ program fut, ugyanazzal a `config.toml`-lal és ugyanazzal a webes felülettel.
 Az alábbi menet **Ubuntu 24.04**-en van végigpróbálva. Debian 12-n és Mint 21-en ugyanezek a
 csomagnevek, csak a libtorrent verziója más.
 
+A [kiadások](../../releases) között van egy Linux `tar.gz` is, Ubuntu 24.04-en fordítva. Ha
+ugyanez a rendszered, akkor a fordítás kihagyható: csomagold ki, és folytasd a
+[telepítésnél](#3-telepítés). Más disztribúción a bináris a glibc és a libtorrent verziója miatt
+nem biztos, hogy elindul, ott a fordítás a járható út.
+
 ### 1. Csomagok
 
 ```bash
@@ -231,7 +286,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profil
 git clone https://github.com/Almito420/StremHU---RS.git stremhu-rs
 cd stremhu-rs
 cargo build --release
-cargo test --release      # 267 teszt, ebből 2 csak Linuxon fut
+cargo test --release      # 274 teszt, ebből 2 csak Linuxon fut
 ```
 
 A `build.rs` észreveszi, hogy nem Windowsra fordít: nem vcpkg-t keres, hanem a rendszer
@@ -242,14 +297,15 @@ betöltési útvonal `$ORIGIN`-nel van beégetve, tehát a két fájlt együtt k
 ### 3. Telepítés
 
 ```bash
-sudo mkdir -p /opt/stremhu-rs
-sudo cp target/release/stremhu-rs target/release/libstremhu_shim.so /opt/stremhu-rs/
+sudo mkdir -p /opt/stremhu-rs/bin
+sudo cp target/release/stremhu-rs target/release/libstremhu_shim.so /opt/stremhu-rs/bin/
 sudo useradd --system --home /opt/stremhu-rs stremhu
 sudo chown -R stremhu:stremhu /opt/stremhu-rs
 ```
 
-Ennyi a telepítés: két fájl. Minden mást — `config.toml`, `state.json`, `downloads/`, `torrents/`,
-`certs/` — a program hoz létre az első indításnál a **bináris mellé**, ezért kell a mappa a
+Ennyi a telepítés: két fájl, a `bin` mappában. Minden mást — `config.toml`, `data/state.json`,
+`data/torrents/`, `data/certs/`, `downloads/`, `logs/` — a program hoz létre az első indításnál,
+egy szinttel a `bin` fölött, tehát itt `/opt/stremhu-rs` alatt; ezért kell az a mappa a
 szolgáltatás felhasználójának írhatóra. Ha a letöltéseket máshova akarod (jellemzően így van, mert
 egy nagy lemezre kell), akkor a `config.toml`-ban abszolút útvonalakat adj meg:
 
@@ -280,7 +336,7 @@ Wants=network-online.target
 Type=simple
 User=stremhu
 WorkingDirectory=/opt/stremhu-rs
-ExecStart=/opt/stremhu-rs/stremhu-rs --log
+ExecStart=/opt/stremhu-rs/bin/stremhu-rs --log
 Restart=on-failure
 RestartSec=5
 
@@ -311,7 +367,7 @@ kapcsolat van, a visszaseedelés pedig pont a bejövőkön múlik.
 
 ### Amit tudni érdemes
 
-- **Ami ki van próbálva Linuxon:** a fordítás, a 267 teszt, a libtorrent motor indulása (a `/status`
+- **Ami ki van próbálva Linuxon:** a fordítás, a 274 teszt, a libtorrent motor indulása (a `/status`
   a shimen keresztül olvassa ki a verziót), a szabad hely mérése (`statvfs`), a processzor- és
   memóriafogyasztás olvasása (`/proc/self/stat`, `/proc/self/status` `RssAnon`), a webes felület és
   az addon manifest. Ubuntu 24.04 / WSL2, gcc 13.3, libtorrent 2.0.10.
@@ -336,6 +392,7 @@ Minden a `config.toml`-ban van, és a fontosabbak a felületről is állítható
 | beállítás | mi ez |
 |---|---|
 | `pieces.readahead_bytes` | mennyi filmet töltsön a lejátszási fej előtt (64 MB) |
+| `pieces.partial_download` | csak a lejátszott részt töltse le, alapból ki |
 | `torrent.max_active_torrents` | egyszerre ennyi torrent aktív, `-1` a korlátlan |
 | `torrent.complete_extras_below_bytes` | a minta és az nfo mérethatára (512 MiB), a kért fájl negyedéig |
 | `torrent.save_path_secondary` | ha az elsődleges mappa megtelt, ide ír |

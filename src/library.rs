@@ -686,31 +686,51 @@ impl Library {
         // complete torrent to be seeded. Where that is the case the setting turns the
         // saving off, and the whole pack is fetched with the wanted episode still
         // getting the deadlines, so playback starts just as quickly either way.
-        if cfg.ncore.requires_full_download {
-            torrent.prioritize_all_pieces(cfg.pieces.idle_priority.max(1))?;
-            tracing::info!(
-                hash = %hash,
-                "the whole torrent will be downloaded: ncore.requires_full_download is on"
-            );
-        } else if siblings.is_empty() {
-            // First file out of this torrent: everything else off.
-            torrent.select_only_file(selected)?;
-        } else {
-            // Another episode of the same pack is already being served. Only this file is
-            // added; nothing else is touched.
-            torrent.set_file_priority(selected, 7)?;
-            // And say so to the tracker at once. Everything this torrent wanted was already on
-            // disk, so it has been announcing itself as a seeder, and a seeder is handed no
-            // peers: without this the new file would sit at zero bytes until the next scheduled
-            // announce, half an hour later.
-            if let Err(e) = torrent.force_reannounce() {
-                tracing::warn!(hash = %hash, error = %e, "could not re-announce");
+        match stream_policy::wanted_at_open(
+            cfg.ncore.requires_full_download,
+            cfg.pieces.partial_download,
+            siblings.len(),
+            cfg.pieces.idle_priority,
+        ) {
+            stream_policy::Wanted::Everything(priority) => {
+                torrent.prioritize_all_pieces(priority)?;
+                tracing::info!(
+                    hash = %hash,
+                    "the whole torrent will be downloaded: ncore.requires_full_download is on"
+                );
             }
-            tracing::info!(
-                hash = %hash,
-                already = siblings.len(),
-                "another file of this torrent is now served as well, tracker told"
-            );
+            stream_policy::Wanted::OnlyWhatIsPlayed => {
+                // Nothing is wanted in advance. A deadline raises a piece to top priority even
+                // from zero, so the window in front of the viewer is fetched and nothing else,
+                // and when the stream stops the priorities go back to zero.
+                torrent.prioritize_all_pieces(0)?;
+                tracing::info!(
+                    hash = %hash,
+                    index = selected,
+                    "partial download: only what is played will be fetched"
+                );
+            }
+            stream_policy::Wanted::OnlyThisFile => {
+                // First file out of this torrent: everything else off.
+                torrent.select_only_file(selected)?;
+            }
+            stream_policy::Wanted::AlsoThisFile => {
+                // Another episode of the same pack is already being served. Only this file is
+                // added; nothing else is touched.
+                torrent.set_file_priority(selected, 7)?;
+                // And say so to the tracker at once. Everything this torrent wanted was already
+                // on disk, so it has been announcing itself as a seeder, and a seeder is handed
+                // no peers: without this the new file would sit at zero bytes until the next
+                // scheduled announce, half an hour later.
+                if let Err(e) = torrent.force_reannounce() {
+                    tracing::warn!(hash = %hash, error = %e, "could not re-announce");
+                }
+                tracing::info!(
+                    hash = %hash,
+                    already = siblings.len(),
+                    "another file of this torrent is now served as well, tracker told"
+                );
+            }
         }
         torrent.set_max_connections(cfg.torrent.connections_while_idle)?;
         torrent.resume()?;
@@ -836,7 +856,11 @@ async fn deadline_loop(lib: Arc<Library>) {
             // so it can become a complete seed instead of sitting at 99% for ever. Deliberately
             // after completion and not before: at the start of a stream every byte of bandwidth
             // belongs to the read head.
+            // Not in partial mode: there the torrent is never going to be a complete seed, so
+            // fetching a sample nobody watches would be the one download the mode exists to
+            // avoid.
             if *entry.complete.read().await
+                && !cfg.pieces.partial_download
                 && !entry.extras_promoted.swap(true, Ordering::Relaxed)
             {
                 let sizes: Vec<u64> = entry.files.iter().map(|f| f.size).collect();
@@ -904,6 +928,33 @@ async fn deadline_loop(lib: Arc<Library>) {
                     );
                     if let Err(e) = entry.torrent.set_max_connections(limit) {
                         tracing::warn!(error = %e, "set_max_connections failed");
+                    }
+                    // Partial download turns the wanted set on and off with the stream, and
+                    // both directions need a nudge.
+                    //
+                    // Stopping: a deadline raises a piece to top priority and resetting the
+                    // deadline does not put it back, so pieces the viewer never reached would
+                    // carry on downloading after the player closed. Everything goes back to
+                    // zero, which libtorrent also drops the outstanding deadlines for.
+                    //
+                    // Starting: with nothing wanted the torrent counts as a finished seed, and
+                    // a seeder is handed no peers. Without an announce the first pieces would
+                    // wait for the scheduled one, half an hour away.
+                    if cfg.pieces.partial_download {
+                        if streaming {
+                            if let Err(e) = entry.torrent.force_reannounce() {
+                                tracing::debug!(key = %key, error = %e, "could not re-announce");
+                            }
+                        } else {
+                            if let Err(e) = entry.torrent.prioritize_all_pieces(0) {
+                                tracing::warn!(key = %key, error = %e, "could not stop the download");
+                            }
+                            entry.active_deadlines.lock().await.clear();
+                            tracing::info!(
+                                key = %key,
+                                "partial download: stopped, only what was played is on the disk"
+                            );
+                        }
                     }
                     tracing::info!(key = %key, streaming, limit, "stream state changed");
                     *was = streaming;
