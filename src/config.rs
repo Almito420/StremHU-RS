@@ -539,6 +539,71 @@ pub fn file_seed_time_still_owed(
     required.saturating_sub(file_seeded_secs)
 }
 
+/// How long the reason for keeping something still has to run, in seconds.
+///
+/// `None` when the reason is not a matter of time: not having watched something has no clock on
+/// it, and neither has a ratio that has to reach 1.0 or a tracker that has never heard of the
+/// torrent. The caller then has nothing to display, which is the honest answer.
+///
+/// This exists because the page was showing a duration next to these reasons that was not the
+/// reason's own: it was the age of the record. On a season pack downloaded in one evening the
+/// two look alike, which is exactly why it went unnoticed — until one episode had been fetched
+/// three hours before the rest and its two numbers disagreed by three hours.
+///
+/// `tracker_remaining` is what the tracker itself said, when it said anything. Preferred over
+/// the arithmetic for the same reason the verdict prefers it: the tracker's answer is the one
+/// that decides whether this becomes a hit and run.
+pub fn remaining_for_reason(
+    m: &Maintenance,
+    c: &Candidate,
+    scope: Scope,
+    why: &str,
+    tracker_remaining: Option<u64>,
+) -> Option<u64> {
+    if !is_about_seeding(why) {
+        return None;
+    }
+    // Two seeding reasons that are not about time at all.
+    if matches!(
+        why,
+        "a trackertől még nincs adat erről a torrentről"
+            | "még nem osztottuk vissza a letöltött mennyiséget"
+    ) {
+        return None;
+    }
+
+    match scope {
+        // This file's own share, on this file's own clock.
+        Scope::File => Some(if c.figures_known {
+            file_seed_time_still_owed(
+                c.file_bytes,
+                c.tracker_downloaded,
+                c.tracker_uploaded,
+                c.file_seeded_secs,
+            )
+        } else {
+            m.keep_seed_seconds.saturating_sub(c.file_seeded_secs)
+        }),
+        Scope::Torrent => {
+            if let Some(secs) = tracker_remaining {
+                return Some(secs);
+            }
+            if m.use_tracker_seed_rule && c.figures_known {
+                let owed =
+                    seed_time_still_owed(c.tracker_downloaded, c.tracker_uploaded, c.seeded_secs);
+                if owed > 0 {
+                    return Some(owed);
+                }
+                // The debt itself is settled and what is left is the margin.
+                return Some(
+                    (m.seed_safety_margin_hours * 3600).saturating_sub(c.seeded_secs),
+                );
+            }
+            Some(m.keep_seed_seconds.saturating_sub(c.seeded_secs))
+        }
+    }
+}
+
 /// Whether a reason for keeping something is about seeding, as opposed to about the file itself.
 ///
 /// Used only to word the summary: "nine torrents still to seed" is a different sentence from
@@ -1314,6 +1379,115 @@ mod tests {
         }
         for r in not_seeding {
             assert!(!is_about_seeding(r), "{r}");
+        }
+    }
+
+    /// The duration shown next to a reason has to be the reason's own.
+    ///
+    /// This is the fault it was written for. The page put the age of the record under the
+    /// reason, unlabelled, and on a season pack fetched in one evening the age and the seeding
+    /// time owed look alike, so it read as the remaining time. On seven episodes of House the
+    /// numbers came out as 1 nap 1 óra six times and 1 nap 6 óra once, and it was the age that
+    /// was different, not the seeding.
+    #[test]
+    fn the_duration_belongs_to_the_reason_it_stands_under() {
+        // The real case: a 38.52 GiB pack, nothing given back, one 7.43 GiB episode complete
+        // for 25 hours. Its own share is 48h + 0.4h per GB = 50.97h, so 25.9 hours are left.
+        let episode = Candidate {
+            kept: false,
+            watched: true,
+            owed_to_tracker: true,
+            tracker_says_clear: false,
+            partial: true,
+            streaming: false,
+            seeded_secs: 25 * 3600,
+            is_keeper: false,
+            file_bytes: 7_978_000_000,
+            file_seeded_secs: 25 * 3600,
+            figures_known: true,
+            tracker_downloaded: 41_360_000_000,
+            tracker_uploaded: 0,
+        };
+        let m = Maintenance {
+            enable_deletion: true,
+            ..Default::default()
+        };
+
+        let file_owed = remaining_for_reason(
+            &m,
+            &episode,
+            Scope::File,
+            "ennek a fájlnak még hátravan a seedelése",
+            None,
+        )
+        .expect("a file's share is a matter of time");
+        assert_eq!(file_owed / 3600, 25, "the file's own share, not the record's age");
+
+        // A torrent-scope reason takes the tracker's own answer when there is one, because that
+        // is the answer the deletion decision goes by as well.
+        assert_eq!(
+            remaining_for_reason(
+                &m,
+                &episode,
+                Scope::Torrent,
+                "a tracker szerint még seedelni kell",
+                Some(46 * 3600)
+            ),
+            Some(46 * 3600)
+        );
+        // Without one, our own arithmetic on the torrent's size: 48h + 0.4 * 38.52 GiB = 63.4h,
+        // less the 25 hours it has been seeding.
+        let torrent_owed = remaining_for_reason(
+            &m,
+            &episode,
+            Scope::Torrent,
+            "a seedelési idő még nem telt le",
+            None,
+        )
+        .expect("also a matter of time");
+        assert_eq!(torrent_owed / 3600, 38);
+
+        // The margin, once the debt itself is settled.
+        let paid = Candidate {
+            tracker_uploaded: episode.tracker_downloaded,
+            seeded_secs: 2 * 3600,
+            ..episode
+        };
+        assert_eq!(
+            remaining_for_reason(&m, &paid, Scope::Torrent, "a ráhagyás ideje még nem telt le", None),
+            Some((m.seed_safety_margin_hours - 2) * 3600)
+        );
+
+        // No figures: the flat setting is what stands in, so that is what is shown.
+        let unknown = Candidate {
+            figures_known: false,
+            file_seeded_secs: 3600,
+            ..episode
+        };
+        assert_eq!(
+            remaining_for_reason(
+                &m,
+                &unknown,
+                Scope::File,
+                "még nem seedeltünk eleget ezzel a fájllal",
+                None
+            ),
+            Some(m.keep_seed_seconds - 3600)
+        );
+
+        // And the reasons with no clock on them at all show nothing rather than something.
+        for why in [
+            "még nem néztük meg",
+            "megtartásra jelölve",
+            "épp játszik",
+            "a trackertől még nincs adat erről a torrentről",
+            "még nem osztottuk vissza a letöltött mennyiséget",
+        ] {
+            assert_eq!(
+                remaining_for_reason(&m, &episode, Scope::Torrent, why, None),
+                None,
+                "{why} is not a matter of time"
+            );
         }
     }
 

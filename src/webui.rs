@@ -351,9 +351,12 @@ fn render_groups(groups: &[TorrentGroup]) -> String {
              <span class=\"gs\">{summary}</span>\
              <span class=\"go {owed_class}\">{owed_label}{owed_detail}</span></summary>\n\
              <div class=\"scroll\"><table class=\"grid\">\n\
-             <tr><th>Fájl</th><th class=\"num\">Méret</th><th class=\"num\">Letöltve</th>\
-             <th class=\"num\">Visszaseedelve</th><th class=\"num\">Arány</th>\
-             <th>Seed kötelezettség</th><th>Megnézve</th><th>Törlés</th><th></th></tr>\n\
+             <tr><th>Fájl</th><th class=\"num\">Méret</th>\
+             <th class=\"num\">Letöltve<div class=\"note\">torrent</div></th>\
+             <th class=\"num\">Visszaseedelve<div class=\"note\">torrent</div></th>\
+             <th class=\"num\">Arány<div class=\"note\">torrent</div></th>\
+             <th>Seed kötelezettség<div class=\"note\">torrent</div></th>\
+             <th>Megnézve</th><th>Törlés</th><th></th></tr>\n\
              {rows}</table></div></details>\n",
             open = if group.open { " open" } else { "" },
             title = html_escape(&group.title),
@@ -392,7 +395,7 @@ fn render_rows(rows: &[DownloadRow]) -> String {
   <td class="num">{ratio}{age}</td>
   <td class="owed-cell {owed_class}">{owed_label}{owed_detail}</td>
   <td>{watched}</td>
-  <td title="{verdict_full}">{verdict_short}<div class="note">{added}</div></td>
+  <td title="{verdict_full}">{verdict_short}<div class="note">{verdict_note}</div></td>
   <td class="actions">
     <form method="post" action="/ui/downloads/keep">
       <input type="hidden" name="key" value="{hash}">
@@ -427,7 +430,7 @@ fn render_rows(rows: &[DownloadRow]) -> String {
             watched = html_escape(&row.watched),
             verdict_full = html_escape(&row.verdict),
             verdict_short = html_escape(&row.verdict_short),
-            added = html_escape(&row.added),
+            verdict_note = html_escape(&row.verdict_note),
             hash = html_escape(&row.key),
             next_keep = if row.keep { "0" } else { "1" },
             next_watched = if row.watched_by_hand { "0" } else { "1" },
@@ -488,7 +491,6 @@ pub struct DownloadRow {
     pub pack_summary: String,
     pub title: String,
     pub size: String,
-    pub added: String,
     pub watched: String,
     /// Whether the tracker still wants seeding: "igen", "nem", or a question mark when the
     /// list has not been read. Three states rather than two, because an empty cell was being
@@ -509,6 +511,10 @@ pub struct DownloadRow {
     pub verdict: String,
     /// Short form of the verdict for the column, with the full reason as a tooltip.
     pub verdict_short: String,
+    /// The duration the reason still has to run, or the record's age when it has none. Always
+    /// carries the word that says which it is: an unlabelled duration under a sentence about
+    /// seeding gets read as the seeding time, and for a while that is not what it was.
+    pub verdict_note: String,
 }
 
 fn render_history(entries: &[(String, String)]) -> String {
@@ -1379,7 +1385,7 @@ mod tests {
             pack_summary: "ez a torrent 3 fájlt szolgál ki, 2 megnézve".into(),
             title: "A hegyi doktor S19E08".into(),
             size: "482.71 MiB".into(),
-            added: "23 hours 0 minutes ago".into(),
+            verdict_note: "még 1 nap 1 óra ezzel a fájllal".into(),
             watched: "yes".into(),
             owed_label: "igen".into(),
             owed_class: "owed-yes",

@@ -221,6 +221,29 @@ pub(crate) async fn downloads_page(state: &AppState, message: Option<String>) ->
             tracker_uploaded: item.tracker_uploaded_bytes,
         };
         let decision = cfg.maintenance.verdict(&candidate);
+        // The duration that belongs under the reason. Worked out from the same Candidate the
+        // verdict came from, so the number and the sentence above it cannot disagree; where the
+        // reason has no clock on it, the record's age stands there instead, and says so.
+        let verdict_note = match decision {
+            crate::config::Verdict::Keep(scope, why) => crate::config::remaining_for_reason(
+                &cfg.maintenance,
+                &candidate,
+                scope,
+                why,
+                owed_entry.and_then(|e| e.remaining_secs),
+            )
+            .map(|secs| match scope {
+                crate::config::Scope::File => {
+                    format!("még {} ezzel a fájllal", crate::webui::human_duration(secs))
+                }
+                crate::config::Scope::Torrent => {
+                    format!("még {} a torrenttel", crate::webui::human_duration(secs))
+                }
+            }),
+            crate::config::Verdict::Delete => None,
+        }
+        .unwrap_or_else(|| format!("hozzáadva: {}", crate::webui::human_ago(item.age(now))));
+
         let (verdict, verdict_short) = match decision {
             crate::config::Verdict::Delete => (
                 "a következő körben törlődik".to_string(),
@@ -274,7 +297,6 @@ pub(crate) async fn downloads_page(state: &AppState, message: Option<String>) ->
             },
             title: item.title.clone(),
             size: crate::webui::human_size(item.file_len),
-            added: crate::webui::human_ago(item.age(now)),
             watched,
             owed_label: owed_label(&item, owes, asked_now).0.to_string(),
             owed_class: owed_label(&item, owes, asked_now).1,
@@ -307,6 +329,7 @@ pub(crate) async fn downloads_page(state: &AppState, message: Option<String>) ->
             keep: item.keep,
             verdict,
             verdict_short,
+            verdict_note,
         });
     }
     // Newest first: that is what someone is looking for after watching something.
