@@ -12,9 +12,12 @@ törlődik. Egy évadcsomagból **csak azt az egy részt** hozza le, amit megné
 
 ## Eredet és licenc
 
-Ez a program a **StremHU** újraírása Rustban, Windowsra. Az eredeti egy Python projekt,
-szerzője **s4pp1**, és **GPL-3.0** licenc alatt áll. A konténerképe a Docker Hubon
-`s4pp1/stremhu-source` néven érhető el.
+Ez a program a **StremHU** újraírása Rustban, Windowsra.
+
+**Eredeti projekt: <https://github.com/s4pp1/stremhu-source>** — szerzője **s4pp1**, licence
+**GPL-3.0**. Konténerképe a Docker Hubon `s4pp1/stremhu-source` néven érhető el, és több
+trackert (nCore, BitHUmen, iNSANE, Majomparádé) és több klienst (Stremio, Nuvio, Kodi)
+szolgál ki.
 
 Az eredeti szerző hozzájárulásával és kérésének megfelelően:
 
