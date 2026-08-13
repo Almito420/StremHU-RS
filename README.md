@@ -332,7 +332,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profil
 ### 2. Fordítás
 
 ```bash
-git clone https://github.com/Almito420/StremHU---RS.git stremhu-rs
+git clone https://github.com/Almito420/StremHU-RS.git stremhu-rs
 cd stremhu-rs
 cargo build --release
 cargo test --release      # 274 teszt, ebből 2 csak Linuxon fut
