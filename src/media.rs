@@ -397,6 +397,11 @@ impl Attributes {
                 tags.push((Group::Resolution, label));
             }
         }
+        if !tags.iter().any(|(g, _)| *g == Group::Language) {
+            if let Some(label) = language_from_category(category) {
+                tags.push((Group::Language, label));
+            }
+        }
 
         Self { tags }
     }
@@ -463,10 +468,38 @@ pub fn known_ids() -> Vec<&'static str> {
 /// would be a guess presented as fact, so it stays at the honest coarse label.
 fn resolution_from_category(category: &str) -> Option<&'static str> {
     let c = category.to_ascii_lowercase();
+    // The second tracker names the resolution outright in its category — `Film/Hun/1080p` —
+    // which is worth more than any guess from the words around it.
+    for (needle, label) in [
+        ("2160p", "UHD (4K)"),
+        ("1080p", "Full HD (1080p)"),
+        ("720p", "HD (720p)"),
+        ("480p", "SD (480p)"),
+    ] {
+        if c.contains(needle) {
+            return Some(label);
+        }
+    }
     if c.contains("hd") {
         Some("HD")
-    } else if c.contains("xvid") || c.contains("dvd") {
+    } else if c.contains("xvid") || c.contains("dvd") || c.contains("sd") {
+        // "sd" is how the second tracker labels its standard-definition categories, and a
+        // release from there may carry nothing in its name that says so.
         Some("SD")
+    } else {
+        None
+    }
+}
+
+/// The spoken language from the tracker's category, for the same reason as the resolution: an
+/// old upload named in Hungarian with no `hun` in the filename is still a Hungarian audio
+/// release, and the category is where the tracker says so.
+fn language_from_category(category: &str) -> Option<&'static str> {
+    let c = category.to_ascii_lowercase();
+    if c.contains("hun") || c.contains("magyar") {
+        Some("Hun")
+    } else if c.contains("eng") {
+        Some("Eng")
     } else {
         None
     }

@@ -24,6 +24,10 @@
 //! Commands:
 //!   stremhu-rs config                       show the effective configuration
 //!   stremhu-rs search <query> [page] [miben] nCore search
+//!   stremhu-rs bithumen <query>             BitHUmen search, row by row, plus its hit and
+//!                                           run list. For checking what the second tracker
+//!                                           is answering with, since its results are read
+//!                                           out of an HTML table.
 //!
 //! Nothing is hardcoded: every tunable lives in the TOML config.
 
@@ -367,6 +371,14 @@ async fn run(command: &str, args: &mut impl Iterator<Item = String>) -> Result<(
             print!("{}", toml::to_string_pretty(&cfg)?);
             Ok(())
         }
+        // The same for the second tracker, and the way to check what it is answering with. Its
+        // results are read out of an HTML table, and a table can change under us: this prints
+        // what the parser made of every row, so a change shows up as a missing figure here
+        // rather than as a stream list that quietly says less than it used to.
+        "bithumen" => {
+            let query = args.next().context("usage: bithumen <query>")?;
+            bithumen_search(&query).await
+        }
         "search" => {
             let query = args.next().context("usage: search <query> [page] [miben]")?;
             let page: u32 = match args.next() {
@@ -551,6 +563,69 @@ async fn search(query: &str, page: u32, miben: &str) -> Result<()> {
     }
     if result.torrents.is_empty() {
         println!("  (no results)");
+    }
+    Ok(())
+}
+
+/// One search on the second tracker, printed row by row, plus its hit-and-run list.
+async fn bithumen_search(query: &str) -> Result<()> {
+    let mut cfg = config::Config::load(&config::Config::path_from_env())?;
+    cfg.apply_env_overrides();
+
+    let client = bithumen::BithumenClient::new(&cfg.bithumen.username, &cfg.bithumen.password)?;
+    if !client.configured() {
+        bail!("bithumen.username / bithumen.password is not set in the config");
+    }
+    client.login().await?;
+
+    let hits = client.search(query, 1).await?;
+    println!("
+BitHUmen: {query}
+{} hit(s)
+", hits.len());
+    for t in &hits {
+        let listing = media::listing(
+            t.tracker.label(),
+            t.title.as_deref().unwrap_or("(no name)"),
+            &t.category,
+            t.seeders,
+            t.leechers,
+            t.size_bytes,
+            false,
+        );
+        println!(
+            "  id={:<9} seed={:<4} leech={:<4} size={:<11} cat={:<16} imdb={:<11} dl={}",
+            t.torrent_id,
+            t.seeders,
+            t.leechers,
+            media::size_label(t.size_bytes),
+            t.category,
+            t.imdb_id.as_deref().unwrap_or("-"),
+            if t.download_url.is_some() { "igen" } else { "NEM" }
+        );
+        println!("    {}", t.title.as_deref().unwrap_or("(no name)"));
+        println!("    {} | {}", listing.name, listing.description.replace(char::from(10), " | "));
+    }
+    if hits.is_empty() {
+        println!("  (nincs talalat)");
+    }
+
+    println!("
+hit and run lista:");
+    match client.hit_and_run().await {
+        Ok(owed) if owed.is_empty() => println!("  (semmi nincs nyitva)"),
+        Ok(owed) => {
+            for (id, remaining) in owed {
+                println!(
+                    "  id={id:<9} hatravan={}",
+                    match remaining {
+                        Some(secs) => webui::human_duration(secs),
+                        None => "nem irta ki".to_string(),
+                    }
+                );
+            }
+        }
+        Err(e) => println!("  HIBA: {e:#}"),
     }
     Ok(())
 }

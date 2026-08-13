@@ -122,14 +122,15 @@ impl crate::maintenance::World for ServerWorld {
 
         if ask.contains(&crate::tracker::Tracker::Bithumen) {
             match self.state.bithumen.read().await.as_ref() {
-                Some(client) => match client.hit_and_run_ids().await {
-                    Ok(ids) => {
+                Some(client) => match client.hit_and_run().await {
+                    Ok(entries) => {
                         owed.asked.push(crate::tracker::Tracker::Bithumen);
                         owed.keys.extend(
-                            ids.iter()
-                                .map(|id| crate::tracker::Tracker::Bithumen.owed_key(id)),
+                            entries
+                                .iter()
+                                .map(|(id, _)| crate::tracker::Tracker::Bithumen.owed_key(id)),
                         );
-                        self.state.store_bithumen_answer(ids).await;
+                        self.state.store_bithumen_answer(entries).await;
                     }
                     Err(e) => tracing::warn!(
                         error = %e,
@@ -257,8 +258,8 @@ impl AppState {
         }
         let guard = self.bithumen.read().await;
         let client = guard.as_ref()?;
-        match client.hit_and_run_ids().await {
-            Ok(ids) => Some(Ok(self.store_bithumen_answer(ids).await)),
+        match client.hit_and_run().await {
+            Ok(entries) => Some(Ok(self.store_bithumen_answer(entries).await)),
             Err(e) => Some(Err(e)),
         }
     }
@@ -271,18 +272,18 @@ impl AppState {
     /// page would have nothing to show but "not asked". The record survives, so it can say
     /// what was true when it was read and how long ago that was.
     ///
-    /// No transfer figures go with it. BitHUmen's page lists the names and the links, not the
-    /// per-torrent totals, so there is nothing to run the ratio arithmetic on and those
-    /// downloads fall to the flat seeding time — the cautious side.
-    async fn store_bithumen_answer(&self, ids: Vec<String>) -> usize {
-        let count = ids.len();
+    /// The remaining time comes with it, the site's own "Hátravan" column, but no transfer
+    /// totals: there is nothing to run the ratio arithmetic on, so those downloads fall back to
+    /// the flat seeding time, which is the cautious side.
+    async fn store_bithumen_answer(&self, entries: Vec<(String, Option<u64>)>) -> usize {
+        let count = entries.len();
         let now = crate::state::now();
-        let owed: Vec<(String, Option<u64>)> = ids.iter().map(|id| (id.clone(), None)).collect();
         self.store
-            .record_obligations(crate::tracker::Tracker::Bithumen, &owed, now)
+            .record_obligations(crate::tracker::Tracker::Bithumen, &entries, now)
             .await;
         let _ = self.store.flush().await;
-        *self.owed_bithumen.write().await = Some((now, ids));
+        *self.owed_bithumen.write().await =
+            Some((now, entries.into_iter().map(|(id, _)| id).collect()));
         count
     }
 

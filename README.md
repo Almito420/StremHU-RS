@@ -93,6 +93,25 @@ A letöltésnél a play URL magával viszi, melyik trackerről jött (`bh:` elő
 oldal egytől számozza a torrentjeit, és a `.torrent`-et csak a saját oldalának a munkamenete
 tudja lehozni — a letöltési link a fiók passkey-ét tartalmazza.
 
+A BitHUmennek nincs JSON API-ja, a találatokat HTML táblából kell kiolvasni, és ez élő oldalon
+van kimérve, nem az eredeti kód alapján feltételezve. Amiben a valóság más volt, mint amit az
+eredeti StremHU csinál:
+
+- **A hit and run lista nem a `hitnrun.php`-n van** — az 404-et ad. A saját adatlapon van:
+  `userdetails.php?id=<azonosító>&hnr=1`, és a felhasználói azonosító **nem szám**, hanem egy
+  token, tehát számjegyeket olvasva soha nem is lehetett volna lekérni. A lista ráadásul kiírja a
+  hátralévő időt is („Hátravan"), tehát az is bekerül a nyilvántartásba.
+- **A kiadás neve a link `title` attribútumában van**, mert a látható szöveg csonkolva van — és
+  a minőség (felbontás, forrás, hang) pont a lecsapott részben lakik. Emiatt nem látszott a
+  minőség a stream listában.
+- **A minőséget a tracker maga is kiírja** a kategória képének alt szövegében (`Film/Hun/1080p`,
+  `Sorozat/Hun/SD`), amit a program akkor használ, ha a névben nincs benne.
+- **A méret cellája nem csak a méretet tartalmazza**, hanem egy arányszámot is, a leecher cella
+  pedig `0 / 0` alakú. Mindkettőt mintára olvassa, nem az egész cellát próbálja számnak érteni.
+
+Ellenőrizni a `stremhu-rs bithumen <keresés>` paranccsal lehet: kiírja soronként, mit értett meg
+a program, és a hit and run listát is.
+
 A törlésnél a BitHUmen letöltései **a saját hit and run listája** szerint mennek, plusz a
 tartalék seedelési idő, mert a BitHUmen oldala nem ír ki torrentenkénti fel/le forgalmat, tehát
 azon nincs mit arányt számolni. És ha egy tracker listáját nem sikerült beolvasni, akkor annak a

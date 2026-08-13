@@ -114,11 +114,21 @@ fn cell_text(block: &str, class: &str) -> Option<String> {
     Some(strip_tags(inner).trim().to_string())
 }
 
-/// The value of a double-quoted HTML attribute.
-fn attribute(block: &str, name: &str) -> Option<String> {
-    let marker = format!("{name}=\"");
-    let rest = block.split_once(marker.as_str())?.1;
-    Some(rest.split('"').next()?.to_string())
+/// The value of an HTML attribute, quoted either way.
+///
+/// Both quote styles, because both are out there in the same page: the second tracker writes
+/// `title='...'` in its search results and `title="..."` on the user page, and a helper that
+/// only knows one of them silently finds nothing for the other.
+pub(crate) fn attribute(block: &str, name: &str) -> Option<String> {
+    for quote in ['"', '\''] {
+        let marker = format!("{name}={quote}");
+        if let Some(rest) = block.split_once(marker.as_str()) {
+            if let Some(value) = rest.1.split(quote).next() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
 }
 
 pub(crate) fn strip_tags(s: &str) -> String {
@@ -141,6 +151,11 @@ pub(crate) fn decode_entities(s: &str) -> String {
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&#39;", "'")
+        // Written into the middle of the figures on the second tracker's pages, where they end
+        // up glued to a number and stop it being read as one.
+        .replace("&times;", "×")
+        .replace("&nbsp;", " ")
+        .replace("&#160;", " ")
 }
 
 /// `482.71 MiB`, `48.56 GiB`, `0 B`, as the tracker writes transfer figures.
@@ -169,7 +184,7 @@ pub(crate) fn parse_size(text: &str) -> Option<u64> {
 
 /// `36ó 5p` and the like, as the tracker writes remaining seed time. Days appear as
 /// `n`, so `2n 3ó` is handled too.
-fn parse_hungarian_duration(text: &str) -> Option<u64> {
+pub(crate) fn parse_hungarian_duration(text: &str) -> Option<u64> {
     let mut total = 0u64;
     let mut number = String::new();
     let mut found = false;
@@ -180,6 +195,12 @@ fn parse_hungarian_duration(text: &str) -> Option<u64> {
             continue;
         }
         if number.is_empty() {
+            continue;
+        }
+        // The unit may be separated from its number: nCore writes `36ó 5p`, the second tracker
+        // writes `23 óra 58 perc`, and taking the character straight after the digits threw
+        // away every value on the second one.
+        if c.is_whitespace() {
             continue;
         }
         let value: u64 = number.parse().unwrap_or(0);
@@ -621,6 +642,14 @@ mod hitnrun_tests {
         assert_eq!(parse_hungarian_duration("16ó 14p"), Some(16 * 3600 + 840));
         assert_eq!(parse_hungarian_duration("2n 3ó"), Some(2 * 86_400 + 3 * 3600));
         assert_eq!(parse_hungarian_duration("45p"), Some(2_700));
+        // The second tracker spells it out, with a space before the unit. Measured from its
+        // own page: `23 óra 58 perc` in the "Hátravan" column.
+        assert_eq!(
+            parse_hungarian_duration("23 óra 58 perc"),
+            Some(23 * 3600 + 58 * 60)
+        );
+        assert_eq!(parse_hungarian_duration("2 nap 3 óra"), Some(2 * 86_400 + 3 * 3600));
+        assert_eq!(parse_hungarian_duration("2 perc"), Some(120));
         assert_eq!(parse_hungarian_duration("0.000"), None, "a ratio is not a time");
         assert_eq!(parse_hungarian_duration(""), None);
         assert_eq!(parse_hungarian_duration("--"), None);
