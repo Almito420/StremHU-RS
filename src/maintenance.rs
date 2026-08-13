@@ -197,6 +197,33 @@ impl Owed {
     }
 }
 
+/// Which trackers have downloads of ours on the disk, and therefore which ones are worth
+/// asking.
+///
+/// A tracker we hold nothing from has nothing to say about us, and asking it anyway is a
+/// request against a private account for no reason at all: one more login, one more page
+/// fetched, every round, for an answer that cannot change any outcome. With the second tracker
+/// switched on but never used, that would have been a daily visit to a site we took nothing
+/// from.
+///
+/// In the order the trackers first appear, so the account almost everything came from is asked
+/// first and a failure there stops the round before the other one is touched.
+pub fn trackers_to_ask(items: &[Item]) -> Vec<crate::tracker::Tracker> {
+    let mut out: Vec<crate::tracker::Tracker> = Vec::new();
+    for item in items {
+        // Without an id there is no way to look this download up on any list, so it cannot be
+        // the reason for asking.
+        if item.ncore_torrent_id.is_empty() {
+            continue;
+        }
+        let tracker = item.tracker();
+        if !out.contains(&tracker) {
+            out.push(tracker);
+        }
+    }
+    out
+}
+
 /// How far a run goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -750,6 +777,50 @@ mod tests {
         // carry it the way a real viewing would.
         item.mark_served(0, 950);
         item
+    }
+
+    /// A tracker we hold nothing from is not asked at all.
+    ///
+    /// The point is the traffic: the sweep runs every evening, and a private site we took
+    /// nothing from should not be getting a login and a page fetch out of it. The second
+    /// tracker switched on and never used is exactly that case.
+    #[test]
+    fn only_the_trackers_we_have_downloads_from_are_asked() {
+        let now = state::now();
+        // Nothing on the disk: nobody to ask.
+        assert!(trackers_to_ask(&[]).is_empty());
+
+        // Only nCore downloads: BitHUmen is not asked, whatever the settings say.
+        let ncore_only = vec![ripe("h1", now), ripe("h2", now)];
+        assert_eq!(
+            trackers_to_ask(&ncore_only),
+            vec![crate::tracker::Tracker::Ncore]
+        );
+
+        // One download from the second tracker is enough to make its list worth reading.
+        let mixed = vec![
+            ripe("h1", now),
+            Item {
+                tracker: "bithumen".into(),
+                ..ripe("h3", now)
+            },
+        ];
+        assert_eq!(
+            trackers_to_ask(&mixed),
+            vec![
+                crate::tracker::Tracker::Ncore,
+                crate::tracker::Tracker::Bithumen
+            ],
+            "the tracker most of it came from is asked first"
+        );
+
+        // A record with no tracker id cannot be looked up on any list, so it is not a reason
+        // to ask one.
+        let no_id = vec![Item {
+            ncore_torrent_id: String::new(),
+            ..ripe("h4", now)
+        }];
+        assert!(trackers_to_ask(&no_id).is_empty());
     }
 
     /// A download from a tracker this round could not ask is left alone, even when everything

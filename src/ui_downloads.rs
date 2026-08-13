@@ -140,6 +140,9 @@ fn owed_detail(
 pub(crate) async fn downloads_page(state: &AppState, message: Option<String>) -> Response {
     let cfg = state.config().await;
     let snapshot = state.owed.read().await.clone();
+    // The second tracker's answer, if it has ever been read: ids and when. Without it a
+    // BitHUmen download is a question the page cannot answer.
+    let bithumen = state.owed_bithumen.read().await.clone();
     let streaming = state.lib.streaming_hashes().await;
     let now = crate::state::now();
 
@@ -177,11 +180,25 @@ pub(crate) async fn downloads_page(state: &AppState, message: Option<String>) ->
             .entries
             .iter()
             .find(|e| !item.ncore_torrent_id.is_empty() && e.torrent_id == item.ncore_torrent_id);
-        let asked_now = snapshot.fetched_at.is_some() && snapshot.error.is_none();
-        let owes = if asked_now {
-            owed_entry.is_some()
-        } else {
-            item.owed_to_tracker
+        // Whether this download's own tracker was asked, and what it said. Two lists, and a
+        // torrent is only ever looked for on the one belonging to the site it came from: both
+        // number their torrents from one, so the other list's answer is about another release.
+        let (asked_now, owes) = match item.tracker() {
+            crate::tracker::Tracker::Ncore => {
+                let asked = snapshot.fetched_at.is_some() && snapshot.error.is_none();
+                (
+                    asked,
+                    if asked {
+                        owed_entry.is_some()
+                    } else {
+                        item.owed_to_tracker
+                    },
+                )
+            }
+            crate::tracker::Tracker::Bithumen => match &bithumen {
+                Some((_, ids)) => (true, ids.iter().any(|id| *id == item.ncore_torrent_id)),
+                None => (false, item.owed_to_tracker),
+            },
         };
 
         let candidate = crate::config::Candidate {
@@ -220,18 +237,19 @@ pub(crate) async fn downloads_page(state: &AppState, message: Option<String>) ->
             tracker_downloaded: item.tracker_downloaded_bytes,
             tracker_uploaded: item.tracker_uploaded_bytes,
         };
-        // The page only ever holds nCore's answer, so a download from the other tracker is a
-        // question it cannot answer: showing a verdict worked out from a list that never
-        // mentioned this torrent would be the page inventing permission the sweep would not
-        // give. The sweep applies the same rule for real — a tracker it could not ask is a
-        // tracker whose downloads it leaves alone.
-        let decision = if candidate.streaming || item.tracker() == crate::tracker::Tracker::Ncore {
-            cfg.maintenance.verdict(&candidate)
-        } else {
-            crate::config::Verdict::Keep(
+        // A download from the second tracker is judged the same way, but only once that
+        // tracker's list has actually been read. Never asked means unknown, and the page says
+        // so rather than inventing a permission the sweep would not give — or refusing one it
+        // would, which is what showing "seeding needed" for ever would amount to.
+        let decision = match item.tracker() {
+            crate::tracker::Tracker::Ncore => cfg.maintenance.verdict(&candidate),
+            crate::tracker::Tracker::Bithumen if candidate.streaming || bithumen.is_some() => {
+                cfg.maintenance.verdict(&candidate)
+            }
+            crate::tracker::Tracker::Bithumen => crate::config::Verdict::Keep(
                 crate::config::Scope::Torrent,
                 "ezt a trackert nem kérdeztük meg",
-            )
+            ),
         };
         // The duration that belongs under the reason. Worked out from the same Candidate the
         // verdict came from, so the number and the sentence above it cannot disagree; where the
@@ -655,9 +673,21 @@ pub(crate) async fn ui_refresh_tracker(
     if let Some(page) = require_login(&state, cookie_header(&headers)).await {
         return page;
     }
-    let message = match state.refresh_owed().await {
-        Ok(entries) => format!("A tracker szerint {} nyitott kötelezettség van.", entries.len()),
-        Err(e) => format!("Nem sikerült beolvasni a tracker listáját: {e}"),
+    let mut message = match state.refresh_owed().await {
+        Ok(entries) => format!("Az nCore szerint {} nyitott kötelezettség van.", entries.len()),
+        Err(e) => format!("Nem sikerült beolvasni az nCore listáját: {e}"),
     };
+    // And the second tracker, but only if something on the disk came from there. Asked here
+    // because this is the button that says "go and look", and the page can then show the same
+    // answer the sweep would act on.
+    match state.refresh_owed_bithumen().await {
+        Some(Ok(count)) => {
+            message.push_str(&format!(" A BitHUmen szerint {count}."));
+        }
+        Some(Err(e)) => {
+            message.push_str(&format!(" A BitHUmen listáját nem sikerült beolvasni: {e}"));
+        }
+        None => {}
+    }
     downloads_page(&state, Some(message)).await
 }

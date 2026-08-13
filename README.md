@@ -99,6 +99,11 @@ azon nincs mit arányt számolni. És ha egy tracker listáját nem sikerült be
 trackernek a letöltéseihez a kör **nem nyúl** — ugyanaz a szabály, ami eddig az nCore-t védte,
 trackerenként alkalmazva.
 
+A listát viszont csak arról a trackerről kérdezi meg, **amelyikről van is letöltés a
+nyilvántartásban**. A kör minden este lefut; egy oldalnak, amiről semmit nem vittünk el, nincs
+mit mondania rólunk, és a napi bejelentkezés meg lapletöltés egy privát fiókon nem ingyen van.
+Ez az nCore-ra is igaz: ha csak BitHUmen letöltés van a lemezen, az nCore-t sem kérdezi.
+
 ### Részleges letöltés
 
 Az eredeti másik üzemmódja is megvan, `pieces.partial_download`, a felületen pipálható,

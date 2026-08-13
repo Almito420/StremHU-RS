@@ -139,6 +139,7 @@ pub async fn serve() -> Result<()> {
         ui: crate::webui::Ui::default(),
         store: store.clone(),
         owed: RwLock::new(OwedSnapshot::default()),
+        owed_bithumen: RwLock::new(None),
         last_notice: RwLock::new(HashMap::new()),
         https_host: RwLock::new(None),
         disks: RwLock::new(None),

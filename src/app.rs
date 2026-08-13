@@ -50,6 +50,14 @@ pub(crate) struct AppState {
     /// it was fetched. Cached deliberately: this is a private tracker, and asking it
     /// once per page view would be unnecessary traffic against the account.
     pub(crate) owed: RwLock<OwedSnapshot>,
+    /// The second tracker's answer, as torrent ids and when they were read. None while it has
+    /// never been asked.
+    ///
+    /// Kept for the same reason as the first tracker's: so the page can say what the sweep
+    /// would do rather than a cautious guess. Without it a BitHUmen download read as "seeding
+    /// needed" for ever, including after the tracker had let it go, and a page that disagrees
+    /// with the behaviour is worse than a page that says nothing.
+    pub(crate) owed_bithumen: RwLock<Option<(crate::state::Unix, Vec<String>)>>,
     /// When each kind of warning was last pushed, so a repeated condition is reported
     /// without being reported on every request.
     pub(crate) last_notice: RwLock<HashMap<String, crate::state::Unix>>,
@@ -97,27 +105,42 @@ impl crate::maintenance::World for ServerWorld {
     /// tracker it belongs to.
     async fn owed(&self) -> Result<crate::maintenance::Owed> {
         let mut owed = crate::maintenance::Owed::default();
+        // Only the trackers something on the disk actually came from. A site we hold nothing
+        // from cannot change any outcome here, and the sweep runs every evening: asking it
+        // anyway would be a daily login and page fetch against a private account for nothing.
+        let ask = crate::maintenance::trackers_to_ask(&self.state.store.items().await);
 
-        let entries = self.state.refresh_owed().await?;
-        owed.asked.push(crate::tracker::Tracker::Ncore);
-        owed.keys.extend(
-            entries
-                .into_iter()
-                .map(|e| crate::tracker::Tracker::Ncore.owed_key(&e.torrent_id)),
-        );
+        if ask.contains(&crate::tracker::Tracker::Ncore) {
+            let entries = self.state.refresh_owed().await?;
+            owed.asked.push(crate::tracker::Tracker::Ncore);
+            owed.keys.extend(
+                entries
+                    .into_iter()
+                    .map(|e| crate::tracker::Tracker::Ncore.owed_key(&e.torrent_id)),
+            );
+        }
 
-        if let Some(client) = self.state.bithumen.read().await.as_ref() {
-            match client.hit_and_run_ids().await {
-                Ok(ids) => {
-                    owed.asked.push(crate::tracker::Tracker::Bithumen);
-                    owed.keys.extend(
-                        ids.iter()
-                            .map(|id| crate::tracker::Tracker::Bithumen.owed_key(id)),
-                    );
-                }
-                Err(e) => tracing::warn!(
-                    error = %e,
-                    "could not read BitHUmen's hit and run list; its downloads stay put"
+        if ask.contains(&crate::tracker::Tracker::Bithumen) {
+            match self.state.bithumen.read().await.as_ref() {
+                Some(client) => match client.hit_and_run_ids().await {
+                    Ok(ids) => {
+                        owed.asked.push(crate::tracker::Tracker::Bithumen);
+                        owed.keys.extend(
+                            ids.iter()
+                                .map(|id| crate::tracker::Tracker::Bithumen.owed_key(id)),
+                        );
+                        *self.state.owed_bithumen.write().await =
+                            Some((crate::state::now(), ids));
+                    }
+                    Err(e) => tracing::warn!(
+                        error = %e,
+                        "could not read BitHUmen's hit and run list; its downloads stay put"
+                    ),
+                },
+                // Downloads from a tracker that is now switched off. Nothing here can say
+                // whether they still owe seeding, so the sweep leaves them alone.
+                None => tracing::warn!(
+                    "there are BitHUmen downloads but the tracker is switched off;                      they stay put until it is switched back on"
                 ),
             }
         }
@@ -221,6 +244,30 @@ pub(crate) fn bithumen_client(
 }
 
 impl AppState {
+    /// Reads the second tracker's list, if there is anything of ours on it to read about.
+    ///
+    /// Called from the button on the downloads page, so the traffic is something the owner
+    /// asked for; it is still gated on actually holding a download from there, because a page
+    /// view must not turn into a visit to a site we took nothing from.
+    pub(crate) async fn refresh_owed_bithumen(&self) -> Option<Result<usize>> {
+        let items = self.store.items().await;
+        if !crate::maintenance::trackers_to_ask(&items)
+            .contains(&crate::tracker::Tracker::Bithumen)
+        {
+            return None;
+        }
+        let guard = self.bithumen.read().await;
+        let client = guard.as_ref()?;
+        match client.hit_and_run_ids().await {
+            Ok(ids) => {
+                let count = ids.len();
+                *self.owed_bithumen.write().await = Some((crate::state::now(), ids));
+                Some(Ok(count))
+            }
+            Err(e) => Some(Err(e)),
+        }
+    }
+
     /// A snapshot, so no handler holds the lock while doing network work.
     pub(crate) async fn config(&self) -> Config {
         self.cfg.read().await.clone()
