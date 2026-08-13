@@ -317,10 +317,19 @@ pub async fn sweep_with<W: World>(
                 && owed.keys.iter().any(|key| *key == owed_key),
             // The list was read at the top of this run, and a run whose read failed was
             // abandoned before reaching here, so absence from it is an answer of now.
-            // Only when the tracker has figures for this torrent: without them its silence
-            // is ignorance, not an answer.
+            //
+            // What counts as proof that the tracker knows the torrent differs by tracker, and
+            // that is the only difference. nCore's proof is its transfer figures — this branch
+            // is exactly as it was and is deliberately left alone. BitHUmen publishes no
+            // figures at all, so its proof is having been on the hit-and-run list at least
+            // once: a torrent that was owed and no longer is has settled, while one that has
+            // never been listed may simply not have been processed yet, and deleting on that
+            // is how an account collects a hit and run.
             tracker_says_clear: !item.ncore_torrent_id.is_empty()
-                && item.tracker_figures_at.is_some()
+                && match item.tracker() {
+                    crate::tracker::Tracker::Ncore => item.tracker_figures_at.is_some(),
+                    crate::tracker::Tracker::Bithumen => item.tracker_known_at.is_some(),
+                }
                 && !owed.keys.iter().any(|key| *key == owed_key),
             partial: item.partial,
             streaming: streaming.iter().any(|h| *h == item.info_hash),

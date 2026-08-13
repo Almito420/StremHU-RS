@@ -243,8 +243,12 @@ pub(crate) async fn downloads_page(state: &AppState, message: Option<String>) ->
             owed_to_tracker: answer.owes,
             // A stored answer counts, but only if nothing has been taken from the torrent
             // since it was given: a later download is a new obligation the answer predates.
+            // Whichever proof that tracker has: nCore's figures, BitHUmen's having listed it.
             tracker_says_clear: !item.ncore_torrent_id.is_empty()
-                && item.tracker_figures_at.is_some()
+                && match item.tracker() {
+                    crate::tracker::Tracker::Ncore => item.tracker_figures_at.is_some(),
+                    crate::tracker::Tracker::Bithumen => item.tracker_known_at.is_some(),
+                }
                 && !answer.owes
                 && (answer.asked
                     || item.owed_checked_at.is_some_and(|at| {

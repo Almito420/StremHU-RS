@@ -155,6 +155,18 @@ pub struct Item {
     /// When those three were read. Kept so the interface can say how fresh they are
     /// rather than presenting a day-old number as current.
     pub tracker_figures_at: Option<Unix>,
+    /// When this torrent was last seen on its tracker's hit-and-run list.
+    ///
+    /// The proof that the tracker has a record of the torrent at all, for a tracker that
+    /// publishes no transfer figures. On nCore that proof is the figures themselves and this
+    /// field is not consulted; on BitHUmen there are no figures, and without some proof its
+    /// silence about a torrent could not be told apart from its not having processed the
+    /// download yet. That distinction is the one that nearly cost a hit and run once.
+    ///
+    /// Written only when the torrent is on the list, so it means "was owed at some point", and
+    /// absence of the torrent from a later reading of that same list then means settled.
+    #[serde(default)]
+    pub tracker_known_at: Option<Unix>,
     /// True when files inside the torrent were deliberately left out, which is the normal
     /// case for one episode taken from a season pack.
     ///
@@ -329,6 +341,7 @@ fn merge(a: Item, b: Item) -> Item {
     out.owed_to_tracker = a.owed_to_tracker || b.owed_to_tracker;
     out.owed_checked_at = a.owed_checked_at.max(b.owed_checked_at);
     out.tracker_figures_at = a.tracker_figures_at.max(b.tracker_figures_at);
+    out.tracker_known_at = a.tracker_known_at.max(b.tracker_known_at);
     out.tracker_downloaded_bytes = a.tracker_downloaded_bytes.max(b.tracker_downloaded_bytes);
     out.tracker_uploaded_bytes = a.tracker_uploaded_bytes.max(b.tracker_uploaded_bytes);
     // Coverage is a bitmap of what was actually sent, so the union is the honest answer.
@@ -614,6 +627,11 @@ impl Store {
             item.owed_to_tracker = found.is_some();
             item.owed_remaining_secs = found.and_then(|(_, remaining)| *remaining);
             item.owed_checked_at = Some(at);
+            // On the list means the tracker has a record of it. Kept once written: what it is
+            // used for is telling "settled" apart from "not processed yet" later on.
+            if found.is_some() {
+                item.tracker_known_at = Some(at);
+            }
             updated += 1;
         }
         drop(state);
