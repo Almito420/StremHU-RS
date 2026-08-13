@@ -128,8 +128,8 @@ pub trait World: Send + Sync {
     fn settings(&self) -> impl Future<Output = crate::config::Maintenance> + Send;
     /// Where the `.torrent` files live, and how long an orphan may linger.
     fn torrent_files_dir(&self) -> impl Future<Output = String> + Send;
-    /// Torrent ids the tracker still expects seeding on. An error abandons the run.
-    fn owed_torrent_ids(&self) -> impl Future<Output = Result<Vec<String>>> + Send;
+    /// What is still owed, and to whom it was possible to ask. An error abandons the run.
+    fn owed(&self) -> impl Future<Output = Result<Owed>> + Send;
     /// Info hashes with a reader attached right now.
     fn streaming_hashes(&self) -> impl Future<Output = Vec<String>> + Send;
     /// Removes several at once, and returns the keys it actually managed to remove.
@@ -175,6 +175,26 @@ pub fn sweep_before_download(
     }
     let wanted = needed.saturating_add(cfg.warn_below_free_bytes);
     free < wanted && since_last_sweep >= FULL_DISK_QUIET_SECONDS
+}
+
+/// What the trackers said this round.
+///
+/// Two lists rather than one, and the second is what makes the first safe to act on. An
+/// obligation missing from `keys` means nothing unless that tracker was actually asked: a
+/// tracker switched off, unreachable, or without credentials produces exactly the same empty
+/// answer as a tracker with nothing owed, and one of those two permits a deletion.
+#[derive(Debug, Clone, Default)]
+pub struct Owed {
+    /// `<tracker>:<torrent id>` for every obligation still open.
+    pub keys: Vec<String>,
+    /// The trackers whose list was read. Anything else is unknown, not clear.
+    pub asked: Vec<crate::tracker::Tracker>,
+}
+
+impl Owed {
+    pub fn asked(&self, tracker: crate::tracker::Tracker) -> bool {
+        self.asked.contains(&tracker)
+    }
 }
 
 /// How far a run goes.
@@ -232,10 +252,10 @@ pub async fn sweep_with<W: World>(
         return report;
     }
 
-    // Only worth asking the tracker when its answer can change an outcome.
-    let owed: Vec<String> = if cfg.hit_and_run && cfg.enable_deletion {
-        match world.owed_torrent_ids().await {
-            Ok(ids) => ids,
+    // Only worth asking the trackers when their answer can change an outcome.
+    let owed = if cfg.hit_and_run && cfg.enable_deletion {
+        match world.owed().await {
+            Ok(owed) => owed,
             Err(e) => {
                 // Deliberately give up rather than delete with an unknown answer.
                 report.abandoned = Some(format!("could not read the tracker's list: {e}"));
@@ -243,25 +263,38 @@ pub async fn sweep_with<W: World>(
             }
         }
     } else {
-        Vec::new()
+        Owed::default()
     };
 
     let streaming = world.streaming_hashes().await;
     let mut doomed: Vec<Item> = Vec::new();
 
     for item in items {
+        // A download whose tracker could not be asked this round is left alone, whatever its
+        // clock says. This is the same rule as an unreadable list, applied per tracker: the
+        // second tracker being switched off is not the second tracker saying nothing is owed.
+        if cfg.hit_and_run && cfg.enable_deletion && !owed.asked(item.tracker()) {
+            report.kept.push((
+                item.title.clone(),
+                item.info_hash.clone(),
+                crate::config::Scope::Torrent,
+                "ezt a trackert nem kérdeztük meg",
+            ));
+            continue;
+        }
+        let owed_key = item.owed_key();
         let candidate = Candidate {
             kept: item.keep,
             watched: item.watched(cfg.watched_position_percent, cfg.watched_min_served_percent),
             owed_to_tracker: !item.ncore_torrent_id.is_empty()
-                && owed.iter().any(|id| *id == item.ncore_torrent_id),
+                && owed.keys.iter().any(|key| *key == owed_key),
             // The list was read at the top of this run, and a run whose read failed was
             // abandoned before reaching here, so absence from it is an answer of now.
             // Only when the tracker has figures for this torrent: without them its silence
             // is ignorance, not an answer.
             tracker_says_clear: !item.ncore_torrent_id.is_empty()
                 && item.tracker_figures_at.is_some()
-                && !owed.iter().any(|id| *id == item.ncore_torrent_id),
+                && !owed.keys.iter().any(|key| *key == owed_key),
             partial: item.partial,
             streaming: streaming.iter().any(|h| *h == item.info_hash),
             // The torrent's clock, not this file's: the debt is the torrent's.
@@ -647,9 +680,15 @@ mod tests {
         async fn torrent_files_dir(&self) -> String {
             String::new()
         }
-        async fn owed_torrent_ids(&self) -> Result<Vec<String>> {
+        async fn owed(&self) -> Result<Owed> {
             match &self.owed {
-                Some(ids) => Ok(ids.clone()),
+                Some(ids) => Ok(Owed {
+                    keys: ids
+                        .iter()
+                        .map(|id| crate::tracker::Tracker::Ncore.owed_key(id))
+                        .collect(),
+                    asked: vec![crate::tracker::Tracker::Ncore],
+                }),
                 None => anyhow::bail!("nCore is unreachable"),
             }
         }
@@ -711,6 +750,39 @@ mod tests {
         // carry it the way a real viewing would.
         item.mark_served(0, 950);
         item
+    }
+
+    /// A download from a tracker this round could not ask is left alone, even when everything
+    /// else about it says it may go.
+    ///
+    /// This is the second tracker's version of the rule that already protects the first: an
+    /// unreadable list is not an empty one. BitHUmen switched off, unreachable, or without
+    /// credentials produces the same silence as BitHUmen with nothing owed, and one of those two
+    /// is a hit and run waiting to happen.
+    #[tokio::test]
+    async fn a_tracker_that_was_not_asked_keeps_its_downloads() {
+        let now = state::now();
+        let from_bithumen = Item {
+            tracker: "bithumen".into(),
+            ..ripe("h9", now)
+        };
+        let store = store_with(vec![from_bithumen]).await;
+        // The fake answers for nCore only, which is exactly the state of a server with the
+        // second tracker switched off.
+        let world = Arc::new(Fake::new());
+        let report = sweep(&*world, &store, &deleting(), now).await;
+
+        assert!(report.deleted.is_empty(), "nothing may go on an unasked list");
+        assert_eq!(
+            report.kept.first().map(|(_, _, _, why)| *why),
+            Some("ezt a trackert nem kérdeztük meg")
+        );
+
+        // And the same download from nCore, whose list *was* read, does go: the rule is about
+        // which tracker was asked, not about being cautious with everything.
+        let store = store_with(vec![ripe("h8", now)]).await;
+        let report = sweep(&*Arc::new(Fake::new()), &store, &deleting(), now).await;
+        assert_eq!(report.deleted.len(), 1);
     }
 
     /// The nightly message is sent whether anything went or not: a job that only speaks up

@@ -101,6 +101,18 @@ pub async fn serve() -> Result<()> {
         }
     }
 
+    // The second tracker, if there is one. Not logged in here: it is only ever used after a
+    // search on the first tracker found nothing, and until that happens there is no reason to
+    // have touched it at all.
+    let bithumen = crate::app::bithumen_client(&cfg.bithumen);
+    match &bithumen {
+        Some(_) => tracing::info!("BitHUmen is configured; it will be asked only when nCore finds nothing"),
+        None if cfg.bithumen.enabled => {
+            tracing::warn!("bithumen is switched on but has no credentials; it will not be searched")
+        }
+        None => {}
+    }
+
     // A store that will not parse is fatal on purpose: it is the only record of what
     // is on the disk, and starting with an empty one would orphan every download and
     // silently drop every seeding obligation.
@@ -118,6 +130,7 @@ pub async fn serve() -> Result<()> {
     let state = Arc::new(AppState {
         lib,
         ncore: RwLock::new(ncore),
+        bithumen: RwLock::new(bithumen),
         tmdb: RwLock::new(tmdb),
         cfg: shared_cfg,
         cfg_path: path.clone(),

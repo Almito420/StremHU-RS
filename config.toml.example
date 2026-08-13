@@ -74,6 +74,14 @@ username = "a nCore felhasznaloneved"
 password = "a nCore jelszavad"
 requires_full_download = false
 
+# Masodik tracker, csak tartaleknak. Akkor kap kerdest, ha az nCore uresen jott vissza
+# a keresett cimre, egyebkent soha. Kikapcsolva vagy fiok nelkul a program egyaltalan
+# nem szol neki, be sem lep.
+[bithumen]
+enabled = false
+username = ""
+password = ""
+
 [filters]
 min_seeders = 1
 only_best_match = false

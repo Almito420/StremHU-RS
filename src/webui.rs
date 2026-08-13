@@ -293,8 +293,10 @@ pub fn page(state: PageState) -> String {
             engine,
             retention,
             network,
+            bithumen_enabled,
         } => network
             .fill(&engine.fill(&retention.fill(SETTINGS_PAGE)))
+            .replace("{{bithumen_enabled}}", checked(bithumen_enabled))
             .replace("{{toml}}", &html_escape(&toml_text))
             .replace("{{message}}", &message_block(message)),
         PageState::Downloads {
@@ -447,6 +449,9 @@ pub enum PageState {
         engine: EngineView,
         retention: RetentionView,
         network: NetworkView,
+        /// Whether the second tracker may be searched. One switch, so it has no view of its
+        /// own: the credentials beside it are never echoed back to the page.
+        bithumen_enabled: bool,
     },
     Downloads {
         groups: Vec<TorrentGroup>,
@@ -1109,6 +1114,7 @@ mod tests {
             network: network_view(),
             engine: engine_view(),
             retention: retention_view(),
+            bithumen_enabled: false,
         });
         assert!(html.contains("a&lt;b"));
         assert!(!html.contains("a<b"));
@@ -1136,6 +1142,7 @@ mod tests {
             network: network_view(),
             engine: engine_view(),
             retention: retention_view(),
+            bithumen_enabled: false,
         });
         assert!(html.contains("/ui/save-retention"));
         assert!(html.contains(r#"name="keep_seed_days" type="number" min="1" value="10""#));
@@ -1172,6 +1179,9 @@ mod tests {
             // save-common
             "ncore_username",
             "ncore_password",
+            "bithumen_username",
+            "bithumen_password",
+            "bithumen_enabled",
             "tmdb_api_key",
             "tmdb_language",
             // save-retention
@@ -1217,6 +1227,7 @@ mod tests {
             network: network_view(),
             engine: engine_view(),
             retention: retention_view(),
+            bithumen_enabled: false,
         });
         assert!(html.contains("/ui/save-engine"));
         // The defaults: 200 active torrents, 200 connections in total, 50 for a stream,
@@ -1252,6 +1263,7 @@ mod tests {
                 },
             ),
             retention: retention_view(),
+            bithumen_enabled: false,
         });
         assert!(html.contains(r#"name="partial_download" checked>"#));
     }

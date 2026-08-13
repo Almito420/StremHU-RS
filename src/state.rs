@@ -191,12 +191,31 @@ pub struct Item {
     pub watched_manually: bool,
     /// Set by hand in the interface. Nothing automatic ever removes a kept item.
     pub keep: bool,
+    /// Which tracker this came from: `ncore` or `bithumen`.
+    ///
+    /// Empty in every record written before there was a second tracker, and empty means nCore.
+    /// It decides two things that must not be got wrong: which session can fetch the `.torrent`
+    /// again after a restart, and which hit-and-run list the obligation is on. One tracker's
+    /// list saying nothing about a torrent is not the other tracker's permission to delete it.
+    #[serde(default)]
+    pub tracker: String,
 }
 
 impl Item {
     /// How this record is addressed: the torrent and the file inside it.
     pub fn key(&self) -> String {
         item_key(&self.info_hash, self.file_index)
+    }
+
+    /// Which tracker it came from, with an empty field meaning nCore.
+    pub fn tracker(&self) -> crate::tracker::Tracker {
+        crate::tracker::Tracker::from_id(&self.tracker)
+    }
+
+    /// How this download's obligation is keyed, so it is only ever looked for on the list of
+    /// the tracker it actually came from.
+    pub fn owed_key(&self) -> String {
+        self.tracker().owed_key(&self.ncore_torrent_id)
     }
 
     /// Whether the viewer got far enough for this to count as seen.

@@ -12,7 +12,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
 use crate::app::*;
-use crate::ncore::NcoreTorrent;
+use crate::tracker::Torrent;
 use crate::stremio::{self, MetaId};
 use crate::http::{authorised, host_for_display};
 
@@ -54,8 +54,30 @@ pub(crate) async fn stream_list(
         }
     };
 
-    let found = run_search(&state, &plan).await;
+    let mut found = run_search(&state, &plan).await;
+
+    // The second tracker, and only now. The rule is the user's and it is not a preference: ask
+    // BitHUmen when nCore had nothing to offer for this title, and not otherwise. nCore is the
+    // account with the history on it, so a hit there is the answer; a search that ended with an
+    // empty stream list is the one case where a second tracker can add anything.
+    //
+    // "Nothing to offer" is measured on the finished list, after the filters: three hits that
+    // are all the wrong episode, or all below the seeder floor, leave the viewer with the same
+    // empty list as no hits at all. A search that *failed* is a different matter and is left
+    // alone here, because an unreachable tracker is not a tracker without the film.
+    if rank_candidates(&found, &req, &cfg.filters).is_empty() {
+        let fallback = run_fallback_search(&state, &plan).await;
+        if !fallback.is_empty() {
+            tracing::info!(
+                id = %raw_id,
+                hits = fallback.len(),
+                "nCore had nothing for this title; BitHUmen answered"
+            );
+            found = fallback;
+        }
+    }
     let usable = rank_candidates(&found, &req, &cfg.filters);
+
     tracing::info!(
         id = %raw_id,
         plan = ?plan,
@@ -90,28 +112,35 @@ pub(crate) async fn stream_list(
         .items()
         .await
         .into_iter()
-        .map(|i| i.ncore_torrent_id)
-        .filter(|id| !id.is_empty())
+        .filter(|i| !i.ncore_torrent_id.is_empty())
+        // Keyed by tracker as well: the star means "this exact release is already on the disk",
+        // and the same number on the other tracker is a different release.
+        .map(|i| i.tracker().owed_key(&i.ncore_torrent_id))
         .collect();
 
     let mut streams = Vec::with_capacity(usable.len());
     for t in usable {
         if let Some(url) = &t.download_url {
-            state.remember_source(&t.torrent_id, url, t.size_bytes).await;
+            state
+                .remember_source(t.tracker, &t.torrent_id, url, t.size_bytes)
+                .await;
         }
+        // The id in the URL carries the tracker, because both sites number their torrents from
+        // one and a bare number would let a play request reach the wrong site's release.
+        let play_id = t.tracker.play_id(&t.torrent_id);
         let play = match (req.season, req.episode) {
-            (Some(s), Some(e)) => format!("{base}/play/{}/{s}/{e}", t.torrent_id),
-            _ => format!("{base}/play/{}", t.torrent_id),
+            (Some(s), Some(e)) => format!("{base}/play/{play_id}/{s}/{e}"),
+            _ => format!("{base}/play/{play_id}"),
         };
         let release = t.title.as_deref().unwrap_or("(no name)");
         let listing = crate::media::listing(
-            "nCore",
+            t.tracker.label(),
             release,
             &t.category,
             t.seeders,
             t.leechers,
             t.size_bytes,
-            have.contains(&t.torrent_id),
+            have.contains(&t.tracker.owed_key(&t.torrent_id)),
         );
         streams.push(stremio::Stream {
             name: listing.name.clone(),
@@ -181,7 +210,7 @@ pub(crate) async fn build_search_plan(
 
 /// Runs the plan, stopping at the first search that returns anything. Trying every
 /// name even after a hit would only add unrelated results from a looser title.
-pub(crate) async fn run_search(state: &AppState, plan: &SearchPlan) -> Vec<NcoreTorrent> {
+pub(crate) async fn run_search(state: &AppState, plan: &SearchPlan) -> Vec<Torrent> {
     match plan {
         SearchPlan::Imdb(imdb) => match state
             .ncore
@@ -215,6 +244,38 @@ pub(crate) async fn run_search(state: &AppState, plan: &SearchPlan) -> Vec<Ncore
     }
 }
 
+/// The same plan on the second tracker, when there is one and it is switched on.
+///
+/// Only ever called after the first tracker's answer turned out to be empty, so there is no
+/// gate here beyond having a client: the decision has already been made by the caller. An empty
+/// result and a failure both come back as an empty list, because to the viewer they are the
+/// same thing at this point — the difference has already been used up on nCore, where a failure
+/// must not send the search on.
+pub(crate) async fn run_fallback_search(state: &AppState, plan: &SearchPlan) -> Vec<Torrent> {
+    let guard = state.bithumen.read().await;
+    let Some(client) = guard.as_ref() else {
+        return Vec::new();
+    };
+
+    let terms: Vec<String> = match plan {
+        SearchPlan::Imdb(imdb) => vec![imdb.clone()],
+        SearchPlan::Names(names) => names.clone(),
+    };
+    for term in terms {
+        match client.search(&term, 1).await {
+            Ok(hits) if !hits.is_empty() => return hits,
+            Ok(_) => tracing::info!(term = %term, "BitHUmen has nothing for this term"),
+            Err(e) => {
+                tracing::warn!(error = %e, term = %term, "BitHUmen search failed");
+                // A tracker that answered with an error will answer the next term the same
+                // way; trying every title against a broken session is traffic for nothing.
+                return Vec::new();
+            }
+        }
+    }
+    Vec::new()
+}
+
 /// Keeps what can actually be played and orders it.
 ///
 /// For an episode the release name has to name that episode, or be the pack for its
@@ -226,10 +287,10 @@ pub(crate) async fn run_search(state: &AppState, plan: &SearchPlan) -> Vec<Ncore
 /// the most-shared copy on top, and on this tracker that is reliably the smallest
 /// re-encode, so the first thing offered would be the worst one available.
 pub(crate) fn rank_candidates<'a>(
-    found: &'a [NcoreTorrent],
+    found: &'a [Torrent],
     req: &stremio::StreamRequest,
     filters: &crate::config::Filters,
-) -> Vec<&'a NcoreTorrent> {
+) -> Vec<&'a Torrent> {
     let want = match (req.season, req.episode) {
         (Some(season), Some(episode)) => Some(crate::series::SeasonEpisode { season, episode }),
         _ => None,
@@ -267,7 +328,7 @@ pub(crate) fn rank_candidates<'a>(
             .then(b.torrent.seeders.cmp(&a.torrent.seeders))
     });
 
-    let mut out: Vec<&NcoreTorrent> = usable.into_iter().map(|r| r.torrent).collect();
+    let mut out: Vec<&Torrent> = usable.into_iter().map(|r| r.torrent).collect();
     if filters.only_best_match {
         out.truncate(1);
     }
@@ -275,7 +336,7 @@ pub(crate) fn rank_candidates<'a>(
 }
 
 pub(crate) struct Ranked<'a> {
-    torrent: &'a NcoreTorrent,
+    torrent: &'a Torrent,
     /// 0 for the episode itself, 1 for the season pack containing it.
     exactness: u8,
     /// Preference positions in the order the configuration says to weigh them.
@@ -287,7 +348,7 @@ pub(crate) struct Ranked<'a> {
 /// Which order matters most is itself configurable, because there is no universally
 /// right answer: a viewer who wants Hungarian audio would rather have 720p Hungarian
 /// than 4K English, and a viewer chasing picture quality would not.
-pub(crate) fn preference_key(t: &NcoreTorrent, filters: &crate::config::Filters) -> Vec<usize> {
+pub(crate) fn preference_key(t: &Torrent, filters: &crate::config::Filters) -> Vec<usize> {
     let attrs = crate::media::Attributes::parse(
         t.title.as_deref().unwrap_or(""),
         &t.category,
@@ -316,8 +377,9 @@ mod tests {
     // check that it is unguessable, reach across for it.
     use crate::http::random_key;
 
-    fn torrent(id: &str, seeders: u64, title: &str, dl: bool) -> NcoreTorrent {
-        NcoreTorrent {
+    fn torrent(id: &str, seeders: u64, title: &str, dl: bool) -> Torrent {
+        Torrent {
+            tracker: crate::tracker::Tracker::Ncore,
             torrent_id: id.into(),
             seeders,
             leechers: 0,
@@ -337,7 +399,7 @@ mod tests {
         }
     }
 
-    fn named(id: &str, seeders: u64, title: &str) -> NcoreTorrent {
+    fn named(id: &str, seeders: u64, title: &str) -> Torrent {
         torrent(id, seeders, title, true)
     }
 

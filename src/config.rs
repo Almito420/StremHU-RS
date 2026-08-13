@@ -75,6 +75,7 @@ pub struct Config {
     pub pieces: Pieces,
     pub maintenance: Maintenance,
     pub ncore: Ncore,
+    pub bithumen: Bithumen,
     pub filters: Filters,
     pub tmdb: Tmdb,
     pub network: Network,
@@ -550,6 +551,7 @@ pub fn remaining_for_reason(
         why,
         "a trackertől még nincs adat erről a torrentről"
             | "még nem osztottuk vissza a letöltött mennyiséget"
+            | "ezt a trackert nem kérdeztük meg"
     ) {
         return None;
     }
@@ -603,6 +605,7 @@ pub fn is_about_seeding(reason: &str) -> bool {
             | "még nem seedeltünk eleget"
             | "még nem seedeltünk eleget ezzel a fájllal"
             | "ennek a fájlnak még hátravan a seedelése"
+            | "ezt a trackert nem kérdeztük meg"
     )
 }
 
@@ -790,6 +793,25 @@ pub fn parse_hhmm(text: &str) -> Option<(u32, u32)> {
         return None;
     }
     Some((hour, minute))
+}
+
+/// The second tracker, asked only when the first found nothing.
+///
+/// Off by default and empty by default, because a tracker nobody configured must not be
+/// contacted at all: an account exists on it or it does not, and a login attempt against a
+/// private site with no credentials is a request that can only look bad.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Bithumen {
+    /// Whether BitHUmen may be searched at all.
+    ///
+    /// The rule it obeys is not a preference: BitHUmen is asked **only** when nCore answered
+    /// and had nothing. nCore is the account with the history on it, so a hit there needs no
+    /// second opinion, and a search that failed is not the same as a search that came back
+    /// empty — a tracker that is merely unreachable must not send its traffic somewhere else.
+    pub enabled: bool,
+    pub username: String,
+    pub password: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -1316,6 +1338,7 @@ mod tests {
             "még nem seedeltünk eleget",
             "még nem seedeltünk eleget ezzel a fájllal",
             "ennek a fájlnak még hátravan a seedelése",
+            "ezt a trackert nem kérdeztük meg",
         ];
         let not_seeding = [
             "az automatikus törlés ki van kapcsolva",
@@ -1432,6 +1455,7 @@ mod tests {
             "épp játszik",
             "a trackertől még nincs adat erről a torrentről",
             "még nem osztottuk vissza a letöltött mennyiséget",
+            "ezt a trackert nem kérdeztük meg",
         ] {
             assert_eq!(
                 remaining_for_reason(&m, &episode, Scope::Torrent, why, None),

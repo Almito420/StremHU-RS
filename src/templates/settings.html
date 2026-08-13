@@ -42,6 +42,19 @@
     <div><label for="nu">Felhasználónév</label><input id="nu" name="ncore_username" autocomplete="off"></div>
     <div><label for="np">Jelszó</label><input id="np" name="ncore_password" type="password" autocomplete="off"></div>
   </div>
+  <h2>BitHUmen</h2>
+  <div class="row">
+    <div><label for="bu">Felhasználónév</label><input id="bu" name="bithumen_username" autocomplete="off"></div>
+    <div><label for="bp">Jelszó</label><input id="bp" name="bithumen_password" type="password" autocomplete="off"></div>
+  </div>
+  <label class="check"><input type="checkbox" name="bithumen_enabled"{{bithumen_enabled}}>
+    BitHUmen keresés, de csak ha az nCore semmit nem talált a címre</label>
+  <p class="note">Nem párhuzamos keresés: elsőként mindig az nCore fut, és a BitHUmen csak akkor
+    kap kérdést, ha ott a lista üresen jött vissza. Ha az nCore keresés hibára fut, az nem
+    ugyanaz, mint hogy nincs találat — olyankor nem megy tovább a kérdés. Kikapcsolva vagy fiók
+    nélkül a program egyáltalán nem szól a BitHUmennek, be sem lép.</p>
+  <p class="note">A BitHUmen letöltéseket a saját hit and run listája szerint kezeli a törlés. Ha
+    azt nem sikerül beolvasni, azokhoz a fájlokhoz nem nyúl.</p>
   <h2>TMDB</h2>
   <div class="row">
     <div><label for="tk">API kulcs</label><input id="tk" name="tmdb_api_key" autocomplete="off"></div>

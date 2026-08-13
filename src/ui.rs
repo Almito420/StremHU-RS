@@ -56,6 +56,7 @@ pub(crate) async fn settings_page(state: &AppState, message: Option<String>) -> 
         engine: crate::webui::EngineView::new(&cfg.torrent, &cfg.maintenance, &cfg.pieces),
         retention: crate::webui::RetentionView::new(&cfg.maintenance, &last_sweep),
         network: network_view(state, &cfg).await,
+        bithumen_enabled: cfg.bithumen.enabled,
     }))
 }
 
@@ -353,6 +354,12 @@ pub(crate) fn redirect(to: &str) -> Response {
 pub(crate) struct CommonForm {
     ncore_username: String,
     ncore_password: String,
+    #[serde(default)]
+    bithumen_username: String,
+    #[serde(default)]
+    bithumen_password: String,
+    #[serde(default)]
+    bithumen_enabled: Option<String>,
     tmdb_api_key: String,
     tmdb_language: String,
 }
@@ -375,6 +382,8 @@ pub(crate) async fn ui_save_common(
     for (value, target) in [
         (&form.ncore_username, &mut cfg.ncore.username),
         (&form.ncore_password, &mut cfg.ncore.password),
+        (&form.bithumen_username, &mut cfg.bithumen.username),
+        (&form.bithumen_password, &mut cfg.bithumen.password),
         (&form.tmdb_api_key, &mut cfg.tmdb.api_key),
         (&form.tmdb_language, &mut cfg.tmdb.language),
     ] {
@@ -382,9 +391,17 @@ pub(crate) async fn ui_save_common(
             *target = value.trim().to_string();
         }
     }
+    cfg.bithumen.enabled = form.bithumen_enabled.is_some();
 
+    let second = if !cfg.bithumen.enabled {
+        "A BitHUmen ki van kapcsolva, tehát nem kérdezzük meg."
+    } else if cfg.bithumen.username.trim().is_empty() || cfg.bithumen.password.is_empty() {
+        "A BitHUmen be van kapcsolva, de hiányzik a fiók, tehát nem kérdezzük meg."
+    } else {
+        "A BitHUmen akkor kap kérdést, ha az nCore semmit nem hozott a címre."
+    };
     let message = match state.apply_config(cfg).await {
-        Ok(()) => Some("Mentve.".to_string()),
+        Ok(()) => Some(format!("Mentve. {second}")),
         Err(e) => Some(format!("Nem sikerült menteni: {e}")),
     };
     settings_page(&state, message).await
@@ -732,6 +749,7 @@ pub(crate) async fn ui_save_toml(
                 engine: crate::webui::EngineView::new(&saved.torrent, &saved.maintenance, &saved.pieces),
                 retention: crate::webui::RetentionView::from_config(&saved.maintenance),
                 network,
+                bithumen_enabled: saved.bithumen.enabled,
             }));
         }
     };

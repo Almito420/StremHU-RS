@@ -220,7 +220,19 @@ pub(crate) async fn downloads_page(state: &AppState, message: Option<String>) ->
             tracker_downloaded: item.tracker_downloaded_bytes,
             tracker_uploaded: item.tracker_uploaded_bytes,
         };
-        let decision = cfg.maintenance.verdict(&candidate);
+        // The page only ever holds nCore's answer, so a download from the other tracker is a
+        // question it cannot answer: showing a verdict worked out from a list that never
+        // mentioned this torrent would be the page inventing permission the sweep would not
+        // give. The sweep applies the same rule for real — a tracker it could not ask is a
+        // tracker whose downloads it leaves alone.
+        let decision = if candidate.streaming || item.tracker() == crate::tracker::Tracker::Ncore {
+            cfg.maintenance.verdict(&candidate)
+        } else {
+            crate::config::Verdict::Keep(
+                crate::config::Scope::Torrent,
+                "ezt a trackert nem kérdeztük meg",
+            )
+        };
         // The duration that belongs under the reason. Worked out from the same Candidate the
         // verdict came from, so the number and the sentence above it cannot disagree; where the
         // reason has no clock on it, the record's age stands there instead, and says so.

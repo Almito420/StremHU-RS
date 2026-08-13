@@ -12,6 +12,7 @@
 //! the session, and any request redirected to the login page triggers exactly
 //! one re-login and retry.
 
+use crate::tracker::{Torrent, Tracker};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
@@ -120,7 +121,7 @@ fn attribute(block: &str, name: &str) -> Option<String> {
     Some(rest.split('"').next()?.to_string())
 }
 
-fn strip_tags(s: &str) -> String {
+pub(crate) fn strip_tags(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut in_tag = false;
     for c in s.chars() {
@@ -134,7 +135,7 @@ fn strip_tags(s: &str) -> String {
     out
 }
 
-fn decode_entities(s: &str) -> String {
+pub(crate) fn decode_entities(s: &str) -> String {
     s.replace("&amp;", "&")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
@@ -146,7 +147,7 @@ fn decode_entities(s: &str) -> String {
 ///
 /// Binary units, which is what the suffixes say and what the tracker means. Reading
 /// `GiB` as 10^9 would understate a 4K release by seven percent.
-fn parse_size(text: &str) -> Option<u64> {
+pub(crate) fn parse_size(text: &str) -> Option<u64> {
     let text = text.trim();
     let split = text.find(|c: char| c.is_ascii_alphabetic())?;
     let (number, unit) = text.split_at(split);
@@ -233,25 +234,8 @@ pub struct NcoreClient {
 }
 
 #[derive(Debug, Clone)]
-pub struct NcoreTorrent {
-    pub torrent_id: String,
-    pub seeders: u64,
-    pub leechers: u64,
-    /// Total size in bytes, as the tracker reports it. Zero when it did not say.
-    /// Worth having before anything is downloaded: it is what tells a 4K remux from a
-    /// re-encode of the same resolution.
-    pub size_bytes: u64,
-    /// None when nCore sent `false` here, which happens for hits that cannot be
-    /// downloaded. Such an entry is still worth showing, just not streamable.
-    pub download_url: Option<String>,
-    pub category: String,
-    pub imdb_id: Option<String>,
-    pub title: Option<String>,
-}
-
-#[derive(Debug, Clone)]
 pub struct SearchPage {
-    pub torrents: Vec<NcoreTorrent>,
+    pub torrents: Vec<Torrent>,
     pub total_results: u64,
     /// None when the current page was the last one.
     pub next_page: Option<u32>,
@@ -459,9 +443,10 @@ fn looks_like_no_results(body: &str) -> bool {
 
 /// Builds a torrent from one JSON entry. Only the id is mandatory: everything
 /// else may legitimately be absent or `false`.
-fn torrent_from_value(v: &Value) -> Option<NcoreTorrent> {
+fn torrent_from_value(v: &Value) -> Option<Torrent> {
     let torrent_id = loose_string(v.get("torrent_id"))?;
-    Some(NcoreTorrent {
+    Some(Torrent {
+        tracker: Tracker::Ncore,
         torrent_id,
         seeders: loose_u64(v.get("seeders")),
         leechers: loose_u64(v.get("leechers")),

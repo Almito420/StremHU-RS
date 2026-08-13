@@ -24,6 +24,9 @@ pub(crate) struct AppState {
     /// Behind locks because the web interface can change credentials while the server
     /// runs, and the clients then have to be rebuilt rather than restarted.
     pub(crate) ncore: RwLock<NcoreClient>,
+    /// The second tracker. None while it is switched off or has no credentials, and then it is
+    /// never contacted: not for a search, not for a login.
+    pub(crate) bithumen: RwLock<Option<crate::bithumen::BithumenClient>>,
     /// None when no API key is configured; TMDB ids cannot be resolved then.
     pub(crate) tmdb: RwLock<Option<crate::tmdb::TmdbClient>>,
     /// One shared handle, not a copy per owner. The library holds this same lock, so a
@@ -59,6 +62,8 @@ pub(crate) struct AppState {
 /// torrent first, which is after the folder has been chosen.
 #[derive(Debug, Clone)]
 pub(crate) struct Source {
+    /// Which tracker offered it, and therefore which session can fetch the `.torrent`.
+    pub(crate) tracker: crate::tracker::Tracker,
     pub(crate) download_url: String,
     pub(crate) size_bytes: u64,
 }
@@ -84,13 +89,39 @@ impl crate::maintenance::World for ServerWorld {
         self.state.cfg.read().await.storage.torrent_files_dir.clone()
     }
 
-    /// Asks the tracker, and caches the answer for the interface to show.
-    async fn owed_torrent_ids(&self) -> Result<Vec<String>> {
-        let result = self.state.refresh_owed().await;
-        match result {
-            Ok(entries) => Ok(entries.into_iter().map(|e| e.torrent_id).collect()),
-            Err(e) => Err(e),
+    /// Asks the trackers, and caches nCore's answer for the interface to show.
+    ///
+    /// nCore failing abandons the whole round, as before: it is the tracker almost everything
+    /// came from. BitHUmen failing does not, but then it is not reported as asked either, and
+    /// its downloads are left alone for this round — which is the same rule, applied to the
+    /// tracker it belongs to.
+    async fn owed(&self) -> Result<crate::maintenance::Owed> {
+        let mut owed = crate::maintenance::Owed::default();
+
+        let entries = self.state.refresh_owed().await?;
+        owed.asked.push(crate::tracker::Tracker::Ncore);
+        owed.keys.extend(
+            entries
+                .into_iter()
+                .map(|e| crate::tracker::Tracker::Ncore.owed_key(&e.torrent_id)),
+        );
+
+        if let Some(client) = self.state.bithumen.read().await.as_ref() {
+            match client.hit_and_run_ids().await {
+                Ok(ids) => {
+                    owed.asked.push(crate::tracker::Tracker::Bithumen);
+                    owed.keys.extend(
+                        ids.iter()
+                            .map(|id| crate::tracker::Tracker::Bithumen.owed_key(id)),
+                    );
+                }
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "could not read BitHUmen's hit and run list; its downloads stay put"
+                ),
+            }
         }
+        Ok(owed)
     }
 
     async fn streaming_hashes(&self) -> Vec<String> {
@@ -169,6 +200,26 @@ pub(crate) async fn make_room_for(state: &Arc<AppState>, dir: &str, needed: u64)
     true
 }
 
+/// The BitHUmen client, or None when the tracker must not be contacted at all.
+///
+/// Switched off or without credentials means no client, and no client means no request: not a
+/// search, not even a login. A private site has nothing to gain from an unauthenticated visit
+/// from an address that also holds a real account.
+pub(crate) fn bithumen_client(
+    cfg: &crate::config::Bithumen,
+) -> Option<crate::bithumen::BithumenClient> {
+    if !cfg.enabled || cfg.username.trim().is_empty() || cfg.password.is_empty() {
+        return None;
+    }
+    match crate::bithumen::BithumenClient::new(&cfg.username, &cfg.password) {
+        Ok(client) => Some(client),
+        Err(e) => {
+            tracing::warn!(error = %e, "cannot build the BitHUmen client");
+            None
+        }
+    }
+}
+
 impl AppState {
     /// A snapshot, so no handler holds the lock while doing network work.
     pub(crate) async fn config(&self) -> Config {
@@ -189,7 +240,12 @@ impl AppState {
             }
         }
         let tmdb = crate::tmdb::TmdbClient::new(&new.tmdb.api_key, &new.tmdb.language).ok();
+        // Rebuilt from the saved settings, so switching the second tracker on or off in the
+        // interface takes effect without a restart — including switching it off, which has to
+        // drop the session rather than leave it usable.
+        let bithumen = bithumen_client(&new.bithumen);
 
+        *self.bithumen.write().await = bithumen;
         *self.ncore.write().await = ncore;
         *self.tmdb.write().await = tmdb;
         *self.cfg.write().await = new;
@@ -211,8 +267,12 @@ pub(crate) enum SearchPlan {
 }
 
 impl AppState {
+    /// Keyed by the play id, which carries the tracker: both sites number their torrents
+    /// from one, so `12345` on its own would let one tracker's cached URL answer for the
+    /// other's release.
     pub(crate) async fn remember_source(
         &self,
+        tracker: crate::tracker::Tracker,
         torrent_id: &str,
         download_url: &str,
         size_bytes: u64,
@@ -222,8 +282,9 @@ impl AppState {
             map.clear();
         }
         map.insert(
-            torrent_id.to_string(),
+            tracker.play_id(torrent_id),
             Source {
+                tracker,
                 download_url: download_url.to_string(),
                 size_bytes,
             },

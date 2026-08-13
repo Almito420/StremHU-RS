@@ -29,9 +29,9 @@ Az eredeti szerző hozzájárulásával és kérésének megfelelően:
 > „Örülök, hogy láttál benne fantáziát és foglalkoztál vele, hogy Windows környezeten tudd
 > használni, ahogy neked kényelmes!" — s4pp1
 
-Ez nem az eredeti projekt folytatása és nem is helyettesíti: az eredeti több trackert,
-több felhasználót és Linux/Docker környezetet szolgál ki, ez pedig egy embert, egy gépen,
-egy trackerrel.
+Ez nem az eredeti projekt folytatása és nem is helyettesíti: az eredeti hat trackert, több
+felhasználót és Linux/Docker környezetet szolgál ki, ez pedig egy embert, egy gépen, egy
+trackerrel — és tartalékként egy másodikkal.
 
 ---
 
@@ -44,7 +44,7 @@ egy trackerrel.
 | futtatás | Python, Docker, FastAPI | egyetlen bináris: Windowson ablak nélkül, Linuxon systemd alatt |
 | adattárolás | SQLite + Alembic migrációk | egy JSON fájl, kézzel is olvasható |
 | torrentmotor | python-libtorrent | libtorrent 2.0.11 beágyazva, C ABI shimen keresztül |
-| trackerek | nCore, FileList, BitHumen, HunTorrent, Insane, Majomparade | csak nCore |
+| trackerek | nCore, FileList, BitHumen, HunTorrent, Insane, Majomparade | nCore, és tartalékként BitHUmen |
 | felhasználók | többfelhasználós, jogosultságokkal | egy admin |
 
 ### Metaadat: nincs saját katalógus
@@ -71,6 +71,33 @@ prioritást (`file_priority`), tehát végig letöltődik és utána seedelhető
 nulla prioritáson marad. A minta és az nfo utólag jön le, ha **kicsi önmagában és a kért fájlhoz
 képest is** — az utóbbi feltétel nélkül egy XviD sorozatcsomag minden 346 MB-os része
 kísérőfájlnak számított, és 22 fájl jött le egy rész kiszolgálásához.
+
+### Második tracker: BitHUmen, tartaléknak
+
+Az eredeti hat trackert kezel, egyenrangúan. Itt kettő van, és nem egyenrangúak:
+**elsőként mindig az nCore fut, és a BitHUmen csak akkor kap kérdést, ha az nCore semmit nem
+hozott a keresett címre.** `bithumen.enabled`, a felületen pipálható, alapból kikapcsolva.
+
+Ami ebben a szabályban benne van:
+
+- **„Semmit nem hozott" a kész listát jelenti**, a szűrők után. Három találat, ami mind a rossz
+  rész, vagy mind a seeder-küszöb alatt van, a nézőnek ugyanaz az üres lista, mint a nulla
+  találat.
+- **A hibára futott keresés nem üres keresés.** Ha az nCore nem válaszol, a kérdés nem megy
+  tovább: egy elérhetetlen tracker nem az a tracker, amin nincs meg a film.
+- **Kikapcsolva vagy fiók nélkül a program nem szól a BitHUmennek, be sem lép.** Egy privát
+  oldalnak semmi haszna egy bejelentkezés nélküli látogatásból arról a címről, ahol egy valódi
+  fiók is van.
+
+A letöltésnél a play URL magával viszi, melyik trackerről jött (`bh:` előtag), mert mindkét
+oldal egytől számozza a torrentjeit, és a `.torrent`-et csak a saját oldalának a munkamenete
+tudja lehozni — a letöltési link a fiók passkey-ét tartalmazza.
+
+A törlésnél a BitHUmen letöltései **a saját hit and run listája** szerint mennek, plusz a
+tartalék seedelési idő, mert a BitHUmen oldala nem ír ki torrentenkénti fel/le forgalmat, tehát
+azon nincs mit arányt számolni. És ha egy tracker listáját nem sikerült beolvasni, akkor annak a
+trackernek a letöltéseihez a kör **nem nyúl** — ugyanaz a szabály, ami eddig az nCore-t védte,
+trackerenként alkalmazva.
 
 ### Részleges letöltés
 
@@ -409,6 +436,7 @@ Minden a `config.toml`-ban van, és a fontosabbak a felületről is állítható
 |---|---|
 | `pieces.readahead_bytes` | mennyi filmet töltsön a lejátszási fej előtt (64 MB) |
 | `pieces.partial_download` | csak a lejátszott részt töltse le, alapból ki |
+| `bithumen.enabled` | a második tracker keresése, csak ha az nCore üres, alapból ki |
 | `torrent.max_active_torrents` | egyszerre ennyi torrent aktív, `-1` a korlátlan |
 | `torrent.complete_extras_below_bytes` | a minta és az nfo mérethatára (512 MiB), a kért fájl negyedéig |
 | `torrent.save_path_secondary` | ha az elsődleges mappa megtelt, ide ír |

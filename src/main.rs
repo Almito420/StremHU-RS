@@ -31,6 +31,7 @@ use anyhow::{Context, Result, bail};
 
 mod addon;
 mod alerts;
+mod bithumen;
 mod app;
 mod config;
 mod disk;
@@ -49,6 +50,7 @@ mod stream_policy;
 mod stremio;
 mod tls;
 mod tmdb;
+mod tracker;
 mod webui;
 
 /// Whether there is a console to write to.

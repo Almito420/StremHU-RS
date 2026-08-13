@@ -78,17 +78,39 @@ pub(crate) async fn play(
         return range_response(state, entry, &cfg, method, headers);
     }
 
-    let bytes = match state
-        .ncore
-        .read()
-        .await
-        .download_torrent(&source.download_url)
-        .await
-    {
+    // Fetched with the session that belongs to the site the link came from. A download URL
+    // carries an account's passkey, so the two are not interchangeable: asking nCore for a
+    // BitHUmen link would send one account's cookies to the other site and get a login page
+    // back for the trouble.
+    let fetched = match source.tracker {
+        crate::tracker::Tracker::Ncore => {
+            state
+                .ncore
+                .read()
+                .await
+                .download_torrent(&source.download_url)
+                .await
+        }
+        crate::tracker::Tracker::Bithumen => match state.bithumen.read().await.as_ref() {
+            Some(client) => client.download_torrent(&source.download_url).await,
+            None => Err(anyhow::anyhow!(
+                "BitHUmen is switched off, so this stream cannot be fetched"
+            )),
+        },
+    };
+    let bytes = match fetched {
         Ok(b) => b,
         Err(e) => {
-            tracing::warn!(error = %e, "could not fetch the .torrent");
-            return (StatusCode::BAD_GATEWAY, format!("nCore: {e}\n")).into_response();
+            tracing::warn!(
+                error = %e,
+                tracker = source.tracker.id(),
+                "could not fetch the .torrent"
+            );
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("{}: {e}\n", source.tracker.label()),
+            )
+                .into_response();
         }
     };
 
@@ -222,7 +244,10 @@ pub(crate) async fn play(
         .store
         .upsert(crate::state::Item {
             info_hash: entry.info_hash.clone(),
-            ncore_torrent_id: torrent_id.clone(),
+            // The tracker's own id, without the play prefix: this is what its hit-and-run list
+            // is keyed by, and the tracker beside it is what says whose list to look on.
+            ncore_torrent_id: crate::tracker::Tracker::from_play_id(&torrent_id).1.to_string(),
+            tracker: source.tracker.id().to_string(),
             title: entry.file_name.clone(),
             file_name: entry.file_name.clone(),
             file_index: entry.selected,
