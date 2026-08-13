@@ -67,6 +67,72 @@ fn release_name(items: &[crate::state::Item], hash: &str) -> Option<String> {
     (root && name.to_lowercase() != "downloads").then_some(name)
 }
 
+/// What this download's own tracker says about it, worked out once.
+///
+/// Once, because there are two trackers and two lists, and every place on the page that says
+/// something about an obligation has to say the same thing. The version of this that computed
+/// it separately for the file row and for the torrent's own line ended up showing a BitHUmen
+/// download as "igen" on one and "the tracker has never heard of this torrent" on the other,
+/// because the second one was reading nCore's list for a torrent that was never on it.
+struct Answer {
+    /// Whether that tracker's list has been read at all — in this run or in an earlier one.
+    asked: bool,
+    /// Whether the torrent is on it.
+    owes: bool,
+    /// How long it still has to run, when the tracker said.
+    remaining: Option<u64>,
+    /// Whether the tracker publishes transfer figures for this torrent. nCore does, and its
+    /// silence about a torrent it has no figures for means it has not processed it yet.
+    /// BitHUmen publishes none at all, so their absence says nothing there.
+    figures: bool,
+}
+
+fn answer_for(
+    item: &crate::state::Item,
+    snapshot: &crate::app::OwedSnapshot,
+    bithumen: &Option<(crate::state::Unix, Vec<String>)>,
+) -> Answer {
+    match item.tracker() {
+        crate::tracker::Tracker::Ncore => {
+            let asked_now = snapshot.fetched_at.is_some() && snapshot.error.is_none();
+            let entry = snapshot
+                .entries
+                .iter()
+                .find(|e| !item.ncore_torrent_id.is_empty() && e.torrent_id == item.ncore_torrent_id);
+            Answer {
+                asked: asked_now || item.owed_checked_at.is_some(),
+                owes: if asked_now {
+                    entry.is_some()
+                } else {
+                    item.owed_to_tracker
+                },
+                remaining: if asked_now {
+                    entry.and_then(|e| e.remaining_secs)
+                } else {
+                    item.owed_remaining_secs
+                },
+                figures: item.tracker_figures_at.is_some(),
+            }
+        }
+        crate::tracker::Tracker::Bithumen => match bithumen {
+            Some((_, ids)) => Answer {
+                asked: true,
+                owes: ids.iter().any(|id| *id == item.ncore_torrent_id),
+                // From the record, which was written by the same read: the list gives the
+                // remaining time per torrent and nothing else.
+                remaining: item.owed_remaining_secs,
+                figures: false,
+            },
+            None => Answer {
+                asked: item.owed_checked_at.is_some(),
+                owes: item.owed_to_tracker,
+                remaining: item.owed_remaining_secs,
+                figures: false,
+            },
+        },
+    }
+}
+
 /// The seeding obligation as one word and a colour.
 ///
 /// Three states on purpose. Presence on the tracker's hit-and-run list means seeding is still
@@ -74,24 +140,21 @@ fn release_name(items: &[crate::state::Item], hash: &str) -> Option<String> {
 /// having read the list is neither, and showing that as "nem" would be a green light nobody
 /// gave: the sweep would still refuse to delete, so the page would be contradicting the
 /// behaviour.
-fn owed_label(
-    item: &crate::state::Item,
-    owes: bool,
-    asked_now: bool,
-) -> (&'static str, &'static str) {
+fn owed_label(item: &crate::state::Item, a: &Answer) -> (&'static str, &'static str) {
     if item.ncore_torrent_id.is_empty() {
         return ("?", "owed-unknown");
     }
-    if !asked_now && item.owed_checked_at.is_none() {
+    if !a.asked {
         return ("?", "owed-unknown");
     }
-    // The same standard the deletion decision uses. Without figures the tracker has no record of
-    // this torrent, and a green "no" next to a download the rules will not release is the page
-    // contradicting the behaviour.
-    if !owes && item.tracker_figures_at.is_none() {
+    // The same standard the deletion decision uses, and only where it applies. On nCore, no
+    // figures means the tracker has no record of this torrent, so its silence is not an answer.
+    // BitHUmen publishes no figures for anything, so requiring them there would leave every one
+    // of its downloads on a question mark for ever.
+    if !a.owes && !a.figures && item.tracker() == crate::tracker::Tracker::Ncore {
         return ("?", "owed-unknown");
     }
-    if owes {
+    if a.owes {
         ("igen", "owed-yes")
     } else {
         ("nem", "owed-no")
@@ -99,37 +162,29 @@ fn owed_label(
 }
 
 /// What goes under that word: the seeding still wanted, or where the answer came from.
-fn owed_detail(
-    item: &crate::state::Item,
-    owes: bool,
-    asked_now: bool,
-    remaining_now: Option<u64>,
-    now: crate::state::Unix,
-) -> String {
+fn owed_detail(item: &crate::state::Item, a: &Answer, now: crate::state::Unix) -> String {
     if item.ncore_torrent_id.is_empty() {
         return "nincs tracker azonosító".into();
     }
-    let remaining = if asked_now {
-        remaining_now
-    } else {
-        item.owed_remaining_secs
-    };
-    if owes {
-        return match remaining {
+    if a.owes {
+        return match a.remaining {
             Some(secs) => format!("még {}", crate::webui::human_duration(secs)),
             None => "a hátralévő időt nem írta ki".into(),
         };
     }
-    if !owes && item.tracker_figures_at.is_none() {
+    if !a.figures && item.tracker() == crate::tracker::Tracker::Ncore {
         return "a tracker még nem tud erről a torrentről".into();
     }
-    match (asked_now, item.owed_checked_at) {
-        (true, _) => "épp most kérdeztük".into(),
-        (false, Some(at)) => format!(
+    if !a.asked {
+        return "még nem kérdeztük".into();
+    }
+    match item.owed_checked_at {
+        Some(at) if now.saturating_sub(at) < 120 => "épp most kérdeztük".into(),
+        Some(at) => format!(
             "utoljára kérdezve: {}",
             crate::webui::human_ago(now.saturating_sub(at))
         ),
-        (false, None) => "még nem kérdeztük".into(),
+        None => "épp most kérdeztük".into(),
     }
 }
 
@@ -174,35 +229,10 @@ pub(crate) async fn downloads_page(state: &AppState, message: Option<String>) ->
         .collect();
     let mut rows = Vec::new();
     for item in all {
-        // This run's reading if there is one, otherwise what was stored from the last: the
-        // obligation is a fact about the download, so it survives a restart.
-        let owed_entry = snapshot
-            .entries
-            .iter()
-            .find(|e| !item.ncore_torrent_id.is_empty() && e.torrent_id == item.ncore_torrent_id);
-        // Whether this download's own tracker was asked, and what it said. Two lists, and a
-        // torrent is only ever looked for on the one belonging to the site it came from: both
-        // number their torrents from one, so the other list's answer is about another release.
-        let (asked_now, owes) = match item.tracker() {
-            crate::tracker::Tracker::Ncore => {
-                let asked = snapshot.fetched_at.is_some() && snapshot.error.is_none();
-                (
-                    asked,
-                    if asked {
-                        owed_entry.is_some()
-                    } else {
-                        item.owed_to_tracker
-                    },
-                )
-            }
-            crate::tracker::Tracker::Bithumen => match &bithumen {
-                Some((_, ids)) => (true, ids.iter().any(|id| *id == item.ncore_torrent_id)),
-                // Nothing read in this run, so what was written down last time stands. The
-                // page says how old it is, which is the part that matters about a stored
-                // answer.
-                None => (false, item.owed_to_tracker),
-            },
-        };
+        // What this download's own tracker says. A torrent is only ever looked for on the list
+        // belonging to the site it came from: both number their torrents from one, so the other
+        // list's answer is about another release entirely.
+        let answer = answer_for(&item, &snapshot, &bithumen);
 
         let candidate = crate::config::Candidate {
             kept: item.keep,
@@ -210,13 +240,13 @@ pub(crate) async fn downloads_page(state: &AppState, message: Option<String>) ->
                 cfg.maintenance.watched_position_percent,
                 cfg.maintenance.watched_min_served_percent,
             ),
-            owed_to_tracker: owes,
+            owed_to_tracker: answer.owes,
             // A stored answer counts, but only if nothing has been taken from the torrent
             // since it was given: a later download is a new obligation the answer predates.
             tracker_says_clear: !item.ncore_torrent_id.is_empty()
                 && item.tracker_figures_at.is_some()
-                && !owes
-                && (asked_now
+                && !answer.owes
+                && (answer.asked
                     || item.owed_checked_at.is_some_and(|at| {
                         all_items
                             .iter()
@@ -244,21 +274,15 @@ pub(crate) async fn downloads_page(state: &AppState, message: Option<String>) ->
         // tracker's list has actually been read. Never asked means unknown, and the page says
         // so rather than inventing a permission the sweep would not give — or refusing one it
         // would, which is what showing "seeding needed" for ever would amount to.
-        let decision = match item.tracker() {
-            crate::tracker::Tracker::Ncore => cfg.maintenance.verdict(&candidate),
-            // A live read, or a stored one from an earlier round: either is an answer. Only
-            // never having asked at all is not.
-            crate::tracker::Tracker::Bithumen
-                if candidate.streaming
-                    || bithumen.is_some()
-                    || item.owed_checked_at.is_some() =>
-            {
-                cfg.maintenance.verdict(&candidate)
-            }
-            crate::tracker::Tracker::Bithumen => crate::config::Verdict::Keep(
+        // A live read, or a stored one from an earlier round: either is an answer. Only never
+        // having asked at all is not, and then the page says that rather than guessing.
+        let decision = if answer.asked || candidate.streaming {
+            cfg.maintenance.verdict(&candidate)
+        } else {
+            crate::config::Verdict::Keep(
                 crate::config::Scope::Torrent,
                 "ezt a trackert nem kérdeztük meg",
-            ),
+            )
         };
         // The duration that belongs under the reason. Worked out from the same Candidate the
         // verdict came from, so the number and the sentence above it cannot disagree; where the
@@ -269,7 +293,7 @@ pub(crate) async fn downloads_page(state: &AppState, message: Option<String>) ->
                 &candidate,
                 scope,
                 why,
-                owed_entry.and_then(|e| e.remaining_secs),
+                answer.remaining,
             )
             .map(|secs| match scope {
                 crate::config::Scope::File => {
@@ -334,8 +358,8 @@ pub(crate) async fn downloads_page(state: &AppState, message: Option<String>) ->
             title: item.title.clone(),
             size: crate::webui::human_size(item.file_len),
             watched,
-            owed_label: owed_label(&item, owes, asked_now).0.to_string(),
-            owed_class: owed_label(&item, owes, asked_now).1,
+            owed_label: owed_label(&item, &answer).0.to_string(),
+            owed_class: owed_label(&item, &answer).1,
             keep: item.keep,
             verdict,
             verdict_short,
@@ -459,20 +483,10 @@ pub(crate) async fn downloads_page(state: &AppState, message: Option<String>) ->
             _ => "a trackertől még nincs adat".to_string(),
         };
         // And how long that obligation has left, said here and nowhere else. It is one debt per
-        // torrent, so the file rows carry the word "igen" and this line carries the clock.
+        // torrent, so the file rows carry the word "igen" and this line carries the clock —
+        // worked out from the same answer the rows used, so the two cannot disagree.
         g.owed_detail = match all_items.iter().find(|i| i.info_hash == g.hash) {
-            Some(i) => {
-                let entry = snapshot.entries.iter().find(|e| {
-                    !i.ncore_torrent_id.is_empty() && e.torrent_id == i.ncore_torrent_id
-                });
-                let asked_now = snapshot.fetched_at.is_some() && snapshot.error.is_none();
-                let owes = if asked_now {
-                    entry.is_some()
-                } else {
-                    i.owed_to_tracker
-                };
-                owed_detail(i, owes, asked_now, entry.and_then(|e| e.remaining_secs), now)
-            }
+            Some(i) => owed_detail(i, &answer_for(i, &snapshot, &bithumen), now),
             None => String::new(),
         };
         // Opened when something in it is about to go, so a deletion is never hidden behind a
@@ -699,4 +713,80 @@ pub(crate) async fn ui_refresh_tracker(
         None => {}
     }
     downloads_page(&state, Some(message)).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::Item;
+
+    fn bithumen_item(id: &str, owes: bool, remaining: Option<u64>) -> Item {
+        Item {
+            info_hash: "aaaa".into(),
+            ncore_torrent_id: id.into(),
+            tracker: "bithumen".into(),
+            owed_to_tracker: owes,
+            owed_remaining_secs: remaining,
+            owed_checked_at: Some(crate::state::now()),
+            ..Item::default()
+        }
+    }
+
+    /// A download from the second tracker has to be described by the second tracker's answer.
+    ///
+    /// This is the fault it was written for. The page held nCore's list, looked this torrent up
+    /// on it, did not find it — of course, it was never on it — and said "the tracker has never
+    /// heard of this torrent", while the row right above it said the obligation was open. The
+    /// number underneath was the flat fallback, nine days, next to a tracker page that said
+    /// twenty-three hours.
+    #[test]
+    fn a_second_tracker_download_is_described_by_its_own_tracker() {
+        let hours_left = 23 * 3600 + 18 * 60;
+        let item = bithumen_item("1197963", true, Some(hours_left));
+        // nCore was read and had seven obligations, none of them this one.
+        let snapshot = crate::app::OwedSnapshot {
+            fetched_at: Some(crate::state::now()),
+            entries: Vec::new(),
+            error: None,
+        };
+        let bithumen = Some((crate::state::now(), vec!["1197963".to_string()]));
+
+        let answer = answer_for(&item, &snapshot, &bithumen);
+        assert!(answer.asked && answer.owes);
+        assert_eq!(answer.remaining, Some(hours_left));
+
+        assert_eq!(owed_label(&item, &answer).0, "igen");
+        let detail = owed_detail(&item, &answer, crate::state::now());
+        assert_eq!(detail, "még 23 óra 18 perc");
+        assert!(
+            !detail.contains("nem tud erről"),
+            "nCore's standard must not be applied to a tracker that publishes no figures: {detail}"
+        );
+    }
+
+    /// Off the list, on a tracker that publishes no figures: that is an answer, and the page says
+    /// so rather than leaving a question mark for ever. What keeps the file then is the flat
+    /// seeding time, which the deletion column explains.
+    #[test]
+    fn off_the_second_trackers_list_is_an_answer() {
+        let item = bithumen_item("42", false, None);
+        let snapshot = crate::app::OwedSnapshot::default();
+        let bithumen = Some((crate::state::now(), vec!["1197963".to_string()]));
+
+        let answer = answer_for(&item, &snapshot, &bithumen);
+        assert!(answer.asked && !answer.owes);
+        assert_eq!(owed_label(&item, &answer).0, "nem");
+    }
+
+    /// Never asked stays a question mark, on either tracker.
+    #[test]
+    fn never_asked_is_not_an_answer() {
+        let item = Item {
+            owed_checked_at: None,
+            ..bithumen_item("42", false, None)
+        };
+        let answer = answer_for(&item, &crate::app::OwedSnapshot::default(), &None);
+        assert!(!answer.asked);
+        assert_eq!(owed_label(&item, &answer).0, "?");
+    }
 }
