@@ -197,6 +197,9 @@ pub(crate) async fn downloads_page(state: &AppState, message: Option<String>) ->
             }
             crate::tracker::Tracker::Bithumen => match &bithumen {
                 Some((_, ids)) => (true, ids.iter().any(|id| *id == item.ncore_torrent_id)),
+                // Nothing read in this run, so what was written down last time stands. The
+                // page says how old it is, which is the part that matters about a stored
+                // answer.
                 None => (false, item.owed_to_tracker),
             },
         };
@@ -243,7 +246,13 @@ pub(crate) async fn downloads_page(state: &AppState, message: Option<String>) ->
         // would, which is what showing "seeding needed" for ever would amount to.
         let decision = match item.tracker() {
             crate::tracker::Tracker::Ncore => cfg.maintenance.verdict(&candidate),
-            crate::tracker::Tracker::Bithumen if candidate.streaming || bithumen.is_some() => {
+            // A live read, or a stored one from an earlier round: either is an answer. Only
+            // never having asked at all is not.
+            crate::tracker::Tracker::Bithumen
+                if candidate.streaming
+                    || bithumen.is_some()
+                    || item.owed_checked_at.is_some() =>
+            {
                 cfg.maintenance.verdict(&candidate)
             }
             crate::tracker::Tracker::Bithumen => crate::config::Verdict::Keep(

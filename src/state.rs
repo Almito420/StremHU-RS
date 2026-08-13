@@ -591,11 +591,23 @@ impl Store {
     /// absence from the list is the answer "nothing is owed on this" and is exactly as much
     /// information as presence. An item with no tracker id cannot be matched either way and
     /// is left alone, so the interface can say so instead of implying an answer.
-    pub async fn record_obligations(&self, owed: &[(String, Option<u64>)], at: Unix) -> usize {
+    pub async fn record_obligations(
+        &self,
+        tracker: crate::tracker::Tracker,
+        owed: &[(String, Option<u64>)],
+        at: Unix,
+    ) -> usize {
         let mut state = self.state.write().await;
         let mut updated = 0;
         for item in state.items.values_mut() {
             if item.ncore_torrent_id.is_empty() {
+                continue;
+            }
+            // Only the downloads that came from the tracker this list belongs to. Both sites
+            // number their torrents from one, so without this check one tracker's list would be
+            // recorded as the answer for the other's release — and "not on the list" is the
+            // answer that lets a deletion happen.
+            if crate::tracker::Tracker::from_id(&item.tracker) != tracker {
                 continue;
             }
             let found = owed.iter().find(|(id, _)| *id == item.ncore_torrent_id);
@@ -615,6 +627,7 @@ impl Store {
     /// tracker id. Returns how many items were updated.
     pub async fn record_tracker_figures(
         &self,
+        tracker: crate::tracker::Tracker,
         torrent_id: &str,
         uploaded: u64,
         downloaded: u64,
@@ -625,6 +638,11 @@ impl Store {
         let mut updated = 0;
         for item in state.items.values_mut() {
             if item.ncore_torrent_id != torrent_id || torrent_id.is_empty() {
+                continue;
+            }
+            // The same reason as above: an id is only an id within its own tracker, and these
+            // figures are what the whole seeding calculation runs on.
+            if crate::tracker::Tracker::from_id(&item.tracker) != tracker {
                 continue;
             }
             item.tracker_uploaded_bytes = uploaded;
@@ -797,6 +815,66 @@ mod tests {
 
     /// The seeding clock is the torrent's, not the file's: a second episode raises what is
     /// owed, and must not throw away the time already served.
+    /// One tracker's list must never be recorded as the answer for the other's download.
+    ///
+    /// Both sites number their torrents from one, so the same id exists on both. Writing
+    /// nCore's answer onto a BitHUmen download would set "nothing is owed" from a list that has
+    /// never heard of it, and that is the one value that lets the sweep delete.
+    #[tokio::test]
+    async fn one_trackers_list_does_not_answer_for_the_others_download() {
+        let dir = std::env::temp_dir().join("stremhu-rs-state-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("two-trackers.json");
+        let _ = std::fs::remove_file(&path);
+        let store = Store::load(&path).expect("loads");
+
+        // The same tracker id on both sites, which is the whole point.
+        store
+            .upsert(Item {
+                info_hash: "aaaa".into(),
+                ncore_torrent_id: "12345".into(),
+                ..Item::default()
+            })
+            .await;
+        store
+            .upsert(Item {
+                info_hash: "bbbb".into(),
+                ncore_torrent_id: "12345".into(),
+                tracker: "bithumen".into(),
+                ..Item::default()
+            })
+            .await;
+
+        // nCore says this torrent still owes seeding. Only its own download may hear that.
+        let updated = store
+            .record_obligations(
+                crate::tracker::Tracker::Ncore,
+                &[("12345".into(), Some(3600))],
+                500,
+            )
+            .await;
+        assert_eq!(updated, 1, "one download, not both");
+
+        let items = store.items().await;
+        let ncore = items.iter().find(|i| i.info_hash == "aaaa").expect("there");
+        let bithumen = items.iter().find(|i| i.info_hash == "bbbb").expect("there");
+        assert!(ncore.owed_to_tracker);
+        assert_eq!(ncore.owed_remaining_secs, Some(3600));
+        assert!(
+            !bithumen.owed_to_tracker && bithumen.owed_checked_at.is_none(),
+            "the other tracker's download was not asked about and must not be marked as if it was"
+        );
+
+        // And the figures likewise: they are what the seeding arithmetic runs on.
+        store
+            .record_tracker_figures(crate::tracker::Tracker::Ncore, "12345", 1, 2, "0.5", 500)
+            .await;
+        let items = store.items().await;
+        let bithumen = items.iter().find(|i| i.info_hash == "bbbb").expect("there");
+        assert!(bithumen.tracker_figures_at.is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[tokio::test]
     async fn the_seeding_clock_belongs_to_the_torrent() {
         let now = 1_000_000u64;
@@ -999,7 +1077,13 @@ mod tests {
         assert_eq!(store.items().await.len(), 1);
 
         // The tracker's answer applies to the torrent, so it reaches every episode of it.
-        store.record_obligations(&[("555".into(), Some(7200))], 500).await;
+        store
+            .record_obligations(
+                crate::tracker::Tracker::Ncore,
+                &[("555".into(), Some(7200))],
+                500,
+            )
+            .await;
         let left = store.get("packhash:5").await.expect("there");
         assert!(left.owed_to_tracker);
         assert_eq!(left.owed_remaining_secs, Some(7200));
@@ -1044,7 +1128,12 @@ mod tests {
             .await;
 
         let owed = vec![("111".to_string(), Some(3600u64))];
-        assert_eq!(store.record_obligations(&owed, 500).await, 2);
+        assert_eq!(
+            store
+                .record_obligations(crate::tracker::Tracker::Ncore, &owed, 500)
+                .await,
+            2
+        );
 
         let items = store.items().await;
         let by = |hash: &str| items.iter().find(|i| i.info_hash == hash).cloned().unwrap();
@@ -1063,7 +1152,12 @@ mod tests {
         assert_eq!(c.owed_checked_at, None, "no tracker id, so no answer either way");
 
         // And the next reading, with the obligation now met, must clear it.
-        assert_eq!(store.record_obligations(&[], 900).await, 2);
+        assert_eq!(
+            store
+                .record_obligations(crate::tracker::Tracker::Ncore, &[], 900)
+                .await,
+            2
+        );
         let items = store.items().await;
         let a = items.iter().find(|i| i.info_hash == "aaaa").unwrap();
         assert!(!a.owed_to_tracker);

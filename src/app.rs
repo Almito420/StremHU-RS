@@ -129,8 +129,7 @@ impl crate::maintenance::World for ServerWorld {
                             ids.iter()
                                 .map(|id| crate::tracker::Tracker::Bithumen.owed_key(id)),
                         );
-                        *self.state.owed_bithumen.write().await =
-                            Some((crate::state::now(), ids));
+                        self.state.store_bithumen_answer(ids).await;
                     }
                     Err(e) => tracing::warn!(
                         error = %e,
@@ -259,13 +258,32 @@ impl AppState {
         let guard = self.bithumen.read().await;
         let client = guard.as_ref()?;
         match client.hit_and_run_ids().await {
-            Ok(ids) => {
-                let count = ids.len();
-                *self.owed_bithumen.write().await = Some((crate::state::now(), ids));
-                Some(Ok(count))
-            }
+            Ok(ids) => Some(Ok(self.store_bithumen_answer(ids).await)),
             Err(e) => Some(Err(e)),
         }
+    }
+
+    /// Writes down what BitHUmen said, in memory and in the state file. Returns how many
+    /// obligations are open.
+    ///
+    /// Recorded against the downloads, not only kept in memory, for the same reason nCore's
+    /// answer is: the memory is gone at the next restart, and until the evening sweep runs the
+    /// page would have nothing to show but "not asked". The record survives, so it can say
+    /// what was true when it was read and how long ago that was.
+    ///
+    /// No transfer figures go with it. BitHUmen's page lists the names and the links, not the
+    /// per-torrent totals, so there is nothing to run the ratio arithmetic on and those
+    /// downloads fall to the flat seeding time — the cautious side.
+    async fn store_bithumen_answer(&self, ids: Vec<String>) -> usize {
+        let count = ids.len();
+        let now = crate::state::now();
+        let owed: Vec<(String, Option<u64>)> = ids.iter().map(|id| (id.clone(), None)).collect();
+        self.store
+            .record_obligations(crate::tracker::Tracker::Bithumen, &owed, now)
+            .await;
+        let _ = self.store.flush().await;
+        *self.owed_bithumen.write().await = Some((now, ids));
+        count
     }
 
     /// A snapshot, so no handler holds the lock while doing network work.
@@ -395,6 +413,7 @@ impl AppState {
                 for e in &all {
                     self.store
                         .record_tracker_figures(
+                            crate::tracker::Tracker::Ncore,
                             &e.torrent_id,
                             e.uploaded_bytes,
                             e.downloaded_bytes,
@@ -422,6 +441,7 @@ impl AppState {
                 for e in &entries {
                     self.store
                         .record_tracker_figures(
+                            crate::tracker::Tracker::Ncore,
                             &e.torrent_id,
                             e.uploaded_bytes,
                             e.downloaded_bytes,
@@ -437,7 +457,9 @@ impl AppState {
                     .iter()
                     .map(|e| (e.torrent_id.clone(), e.remaining_secs))
                     .collect();
-                self.store.record_obligations(&owed, now).await;
+                self.store
+                    .record_obligations(crate::tracker::Tracker::Ncore, &owed, now)
+                    .await;
                 let _ = self.store.flush().await;
                 Ok(entries)
             }
