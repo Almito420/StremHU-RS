@@ -245,9 +245,40 @@ impl Item {
         if self.file_len == 0 || self.play_count == 0 {
             return false;
         }
-        let reached = percent_of(self.furthest_byte, self.file_len) >= position_percent as u64;
+        // How far the viewer actually got, measured as the run of the file served from the
+        // beginning without a gap. Not the furthest byte reached: a player reads the tail of
+        // the file before it plays a frame, to find the seek index, so that number is at the
+        // end of the film within seconds of pressing play. Measured on a 50 minute episode
+        // watched for 35, the furthest byte said 100% and the coverage said 70%, and the two
+        // together were enough to call it watched.
+        let reached = self.watched_percent() >= position_percent as u64;
         let covered = self.served_percent() >= min_served_percent as u64;
         reached && covered
+    }
+
+    /// The longest unbroken run of the file that was served, as a percentage of it.
+    ///
+    /// A run rather than a total, because a total counts the tail the player reads for the seek
+    /// index as if it had been watched. A run rather than a run from the very beginning, because
+    /// skipping the intro is normal and still ends in having watched the film.
+    pub fn watched_percent(&self) -> u64 {
+        if self.file_len == 0 {
+            return 0;
+        }
+        let chunks = self.file_len.div_ceil(COVERAGE_CHUNK);
+        let (mut best, mut run) = (0u64, 0u64);
+        for chunk in 0..chunks {
+            let byte = (chunk / 8) as usize;
+            let bit = 1u8 << (chunk % 8);
+            match self.served_map.get(byte) {
+                Some(slot) if slot & bit != 0 => {
+                    run += 1;
+                    best = best.max(run);
+                }
+                _ => run = 0,
+            }
+        }
+        (best * 100 / chunks.max(1)).min(100)
     }
 
     /// How much of the file has been sent at least once, as a percentage.
@@ -365,13 +396,6 @@ pub fn strip_bom(text: &str) -> &str {
     text.strip_prefix('\u{feff}').unwrap_or(text)
 }
 
-/// Percentage of `total` that `part` represents, saturating and integer-only.
-fn percent_of(part: u64, total: u64) -> u64 {
-    if total == 0 {
-        return 0;
-    }
-    ((part as u128 * 100) / total as u128).min(u64::MAX as u128) as u64
-}
 
 /// One sitting in front of something, for the history list.
 ///
@@ -721,6 +745,17 @@ impl Store {
         let found = match state.items.get_mut(key) {
             Some(item) => {
                 item.watched_manually = watched;
+                // Taking it back has to take back the measurement as well, or the button says
+                // one thing and the row goes on saying "megnézve" from what was measured. What
+                // is being said here is "I have not watched this", so the record of having
+                // watched it goes.
+                if !watched {
+                    item.served_map.clear();
+                    item.furthest_byte = 0;
+                    item.play_count = 0;
+                    item.first_played_at = None;
+                    item.last_played_at = None;
+                }
                 true
             }
             None => false,
@@ -1309,12 +1344,16 @@ mod tests {
         assert_eq!(back.served_percent(), before);
     }
 
+    /// 35 minutes of a 50 minute episode is not a watched episode, however far into the file
+    /// the player reached: it reads the tail for the seek index before it plays a frame.
     #[test]
-    fn percent_of_is_saturating() {
-        assert_eq!(percent_of(0, 0), 0);
-        assert_eq!(percent_of(50, 100), 50);
-        assert_eq!(percent_of(u64::MAX, u64::MAX), 100);
-        assert_eq!(percent_of(1, 3), 33);
+    fn watching_two_thirds_is_not_watching_it() {
+        let mut f = film(10 * GB);
+        f.furthest_byte = 10 * GB;
+        f.mark_served(0, 7 * GB);
+        f.mark_served(10 * GB - COVERAGE_CHUNK, COVERAGE_CHUNK); // a lejátszó a végét is beolvassa
+        assert_eq!(f.watched_percent(), 70);
+        assert!(!f.watched(90, 50));
     }
 
     fn temp_path(name: &str) -> PathBuf {

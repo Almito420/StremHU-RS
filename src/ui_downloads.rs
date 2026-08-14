@@ -344,7 +344,9 @@ pub(crate) async fn downloads_page(state: &AppState, message: Option<String>) ->
 
         rows.push(crate::webui::DownloadRow {
             key: item.key(),
-            watched_by_hand: item.watched_manually,
+            // The effective state, so the button offers the other one: what is on the row is
+            // "megnézve" whether a person said so or the measurement did.
+            watched_by_hand: candidate.watched,
             pack_summary: match per_torrent.get(&item.info_hash) {
                 Some((files, watched)) if *files > 1 => {
                     let keeper = keepers

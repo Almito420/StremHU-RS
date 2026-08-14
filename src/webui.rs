@@ -471,7 +471,9 @@ pub enum PageState {
 pub struct DownloadRow {
     /// Which record this row is: `info_hash:file_index`. What the buttons post.
     pub key: String,
-    /// Whether this file was marked watched by hand, which the button has to reflect.
+    /// Whether this file counts as watched at all, by hand or by measurement. The button
+    /// reflects the state the row shows, not only the flag: a file the measurement called
+    /// watched offered "Megnéztem", which is a button for something already true.
     pub watched_by_hand: bool,
     /// For a torrent serving more than one file: how many, and how many are watched.
     ///
