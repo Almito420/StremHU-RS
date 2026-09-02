@@ -526,6 +526,7 @@ pub(crate) fn rank_candidates<'a>(
             Some(Ranked {
                 torrent: t,
                 exactness,
+                three_d: filters.three_d_last && is_three_d(t),
                 preference: preference_key(t, filters),
             })
         })
@@ -534,6 +535,10 @@ pub(crate) fn rank_candidates<'a>(
     usable.sort_by(|a, b| {
         a.exactness
             .cmp(&b.exactness)
+            // Ahead of every quality preference, because this is not a matter of better and
+            // worse: a stereoscopic file on a television that is not set up for it does not
+            // play badly, it plays wrong.
+            .then(a.three_d.cmp(&b.three_d))
             .then(a.preference.cmp(&b.preference))
             // Among equally suitable copies, the better-seeded one starts faster.
             .then(b.torrent.seeders.cmp(&a.torrent.seeders))
@@ -546,10 +551,18 @@ pub(crate) fn rank_candidates<'a>(
     out
 }
 
+/// Whether this release is stereoscopic, read from its name the same way the badge reads it.
+fn is_three_d(t: &Torrent) -> bool {
+    crate::media::Attributes::parse(t.title.as_deref().unwrap_or(""), &t.category)
+        .has(crate::media::Group::ThreeD)
+}
+
 pub(crate) struct Ranked<'a> {
     torrent: &'a Torrent,
     /// 0 for the episode itself, 1 for the season pack containing it.
     exactness: u8,
+    /// True sorts last, so a 3D copy is never the one offered by default.
+    three_d: bool,
     /// Preference positions in the order the configuration says to weigh them.
     preference: Vec<usize>,
 }

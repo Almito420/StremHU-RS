@@ -840,6 +840,12 @@ pub struct Filters {
     pub language_order: Vec<String>,
     /// Which of the three matters most when they disagree. First in this list wins.
     pub priority: Vec<String>,
+    /// Offer stereoscopic releases last.
+    ///
+    /// Not a filter: a 3D copy stays in the list and can be chosen. It simply stops being the
+    /// answer somebody gets without asking for it, which matters most with `only_best_match`
+    /// on, where the first row is the only row.
+    pub three_d_last: bool,
 }
 
 impl Default for Filters {
@@ -853,6 +859,7 @@ impl Default for Filters {
             // Language first: a film in the wrong language is not worth watching at any
             // resolution, whereas a lower resolution is merely worse.
             priority: vec!["language".into(), "resolution".into(), "source".into()],
+            three_d_last: true,
         }
     }
 }

@@ -9,8 +9,15 @@
 //! deliberately and character for character where it matters: those regexes have been
 //! run against this tracker's naming habits for a long time, and inventing new ones
 //! would only reintroduce mistakes that have already been fixed once. Two of its
-//! groups are left out, editions and 3D, because nothing on this tracker is offered in
-//! more than one edition often enough to earn a line.
+//! groups were left out at first, editions and 3D, on the grounds that nothing here comes in
+//! more than one edition often enough to earn a line. Both are back, and 3D for a sharper
+//! reason than completeness: starting a side-by-side file by accident on a television that is
+//! not set up for it is a bad minute, and the label costs nothing.
+//!
+//! A ninth group is ours rather than the original's: which streaming service a release was
+//! taken from, read from the tag the tracker puts in the name. It answers a question the
+//! original never asked, and it is the one a viewer with subscriptions asks first: is this
+//! already somewhere I pay for, so I need not download it at all?
 //!
 //! Order inside a group is the order of the table, so the strongest match is listed
 //! first and single-valued groups take the first hit rather than an arbitrary one.
@@ -30,6 +37,12 @@ pub enum Group {
     AudioQuality,
     AudioChannels,
     AudioSpatial,
+    /// Cut or release variant: IMAX, Extended, the director's cut.
+    Edition,
+    /// Side-by-side and over-under stereoscopic releases.
+    ThreeD,
+    /// The streaming service the release was taken from.
+    Service,
 }
 
 impl Group {
@@ -44,6 +57,14 @@ impl Group {
             Group::AudioQuality => "🔊",
             Group::AudioChannels => "📻",
             Group::AudioSpatial => "🌌",
+            // The original's own marker for this group.
+            Group::Edition => "🏷️",
+            // Goggles: the pull request that brought this to the original names this emoji in
+            // as many words, and it reads as stereoscopic at a glance in a way a label does not.
+            Group::ThreeD => "🥽",
+            // Not a logo. A Stremio stream row is text, so a real service mark cannot go there;
+            // popcorn plus the service name is as close as the medium allows.
+            Group::Service => "🍿",
         }
     }
 
@@ -51,7 +72,12 @@ impl Group {
     /// and one video codec; it can carry several audio tracks and several sources.
     fn multiple(self) -> bool {
         match self {
-            Group::Resolution | Group::VideoCodec | Group::AudioChannels => false,
+            // A release is in one stereoscopic layout or none, and comes from one service.
+            Group::Resolution
+            | Group::VideoCodec
+            | Group::AudioChannels
+            | Group::ThreeD
+            | Group::Service => false,
             _ => true,
         }
     }
@@ -81,6 +107,130 @@ struct Tag {
 /// `DTS`, or the looser pattern claims the match and the label understates what the
 /// release actually is.
 static TAGS: &[Tag] = &[
+    // Stereoscopic. The pattern is the original's, character for character: `3d` on its own,
+    // and the three abbreviations that actually appear in release names. Anchored on word
+    // boundaries so a group called "3DTV" or a codec string cannot claim it.
+    Tag {
+        group: Group::ThreeD,
+        id: "3d",
+        label: "3D",
+        pattern: r"(?i)\b(3d|hsbs|hou|half[-_. ]?(?:sbs|ou))\b",
+        supersedes: &[],
+    },
+    // Streaming services, as this tracker writes them: the tag sits between dots in the
+    // release name, `The.Whisper.Man.2026.2160p.NF.WEB-DL`. The separators are required on
+    // both sides rather than a bare word boundary, because two and four letter abbreviations
+    // are exactly what a release group name is made of, and `NF` inside one is not Netflix.
+    //
+    // Which services appear here was measured against the tracker rather than copied from a
+    // list of everything that exists.
+    Tag {
+        group: Group::Service,
+        id: "netflix",
+        label: "Netflix",
+        pattern: r"(?i)[-_. ]nf[-_. ]",
+        supersedes: &[],
+    },
+    Tag {
+        group: Group::Service,
+        id: "hbo",
+        label: "HBO Max",
+        pattern: r"(?i)[-_. ](?:hbo|hmax)[-_. ]",
+        supersedes: &[],
+    },
+    Tag {
+        group: Group::Service,
+        id: "disney",
+        label: "Disney+",
+        pattern: r"(?i)[-_. ]dsnp[-_. ]",
+        supersedes: &[],
+    },
+    Tag {
+        group: Group::Service,
+        id: "amazon",
+        label: "Amazon",
+        pattern: r"(?i)[-_. ]amzn[-_. ]",
+        supersedes: &[],
+    },
+    Tag {
+        group: Group::Service,
+        id: "appletv",
+        label: "Apple TV+",
+        pattern: r"(?i)[-_. ]atvp[-_. ]",
+        supersedes: &[],
+    },
+    Tag {
+        group: Group::Service,
+        id: "paramount",
+        label: "Paramount+",
+        pattern: r"(?i)[-_. ]pmtp[-_. ]",
+        supersedes: &[],
+    },
+    Tag {
+        group: Group::Service,
+        id: "skyshowtime",
+        label: "SkyShowtime",
+        pattern: r"(?i)[-_. ]skst[-_. ]",
+        supersedes: &[],
+    },
+    // Editions, most specific first. The labels are Hungarian because this is what the viewer
+    // reads, and the ids are the original's so an ordering written against them still applies.
+    Tag {
+        group: Group::Edition,
+        id: "imax",
+        label: "IMAX",
+        pattern: r"(?i)\bimax\b",
+        supersedes: &[],
+    },
+    Tag {
+        group: Group::Edition,
+        id: "directors-cut",
+        label: "Rendezői változat",
+        pattern: r"(?i)\b(directors?[-_. ]?cut|dc)\b",
+        supersedes: &[],
+    },
+    Tag {
+        group: Group::Edition,
+        id: "extended",
+        label: "Bővített",
+        pattern: r"(?i)\bextended\b",
+        supersedes: &[],
+    },
+    Tag {
+        group: Group::Edition,
+        id: "remastered",
+        label: "Felújított",
+        pattern: r"(?i)\bremastered\b",
+        supersedes: &[],
+    },
+    Tag {
+        group: Group::Edition,
+        id: "uncut",
+        label: "Vágatlan",
+        pattern: r"(?i)\b(uncut|unrated)\b",
+        supersedes: &[],
+    },
+    Tag {
+        group: Group::Edition,
+        id: "open-matte",
+        label: "Open Matte",
+        pattern: r"(?i)\bopen[-_. ]?matte\b",
+        supersedes: &[],
+    },
+    Tag {
+        group: Group::Edition,
+        id: "theatrical",
+        label: "Mozis",
+        pattern: r"(?i)\btheatrical\b",
+        supersedes: &[],
+    },
+    Tag {
+        group: Group::Edition,
+        id: "special-edition",
+        label: "Különkiadás",
+        pattern: r"(?i)\b(special|collectors?|limited|ultimate|definitive|anniversary)[-_. ]?edition\b",
+        supersedes: &[],
+    },
     // Languages.
     Tag {
         group: Group::Language,
@@ -439,6 +589,11 @@ impl Attributes {
     }
 
     /// One group as `marker label, label`, or None when nothing matched.
+    /// Whether anything in this group matched.
+    pub fn has(&self, group: Group) -> bool {
+        self.tags.iter().any(|(g, _)| *g == group)
+    }
+
     pub fn render(&self, group: Group) -> Option<String> {
         let labels = self.of(group);
         if labels.is_empty() {
@@ -577,6 +732,11 @@ pub fn listing(
     }
     badge.extend(attrs.render(Group::Resolution));
     badge.extend(attrs.render(Group::VideoQuality));
+    // Both of these belong in front of the click rather than in the detail lines. 3D because
+    // starting a side-by-side file on a television that is not set up for it is a bad minute,
+    // and the service because the whole point of knowing is to decide not to download at all.
+    badge.extend(attrs.render(Group::ThreeD));
+    badge.extend(attrs.render(Group::Service));
     // Never leave the badge empty: an unlabelled row cannot be told from its neighbour.
     if badge.is_empty() {
         badge.push(indexer.to_string());
@@ -600,6 +760,7 @@ pub fn listing(
         attrs.render(Group::AudioChannels),
     ];
     let third = [
+        attrs.render(Group::Edition),
         attrs.render(Group::Source),
         attrs.render(Group::VideoCodec),
     ];
@@ -633,6 +794,103 @@ fn join(parts: impl Iterator<Item = Option<String>>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The names on the badge, so a test can say what the viewer sees before clicking.
+    fn badge_of(name: &str) -> String {
+        listing("nCore", name, "hdser_hun", 10, 0, 1_000_000_000, false).name
+    }
+
+    fn details_of(name: &str) -> String {
+        listing("nCore", name, "hdser_hun", 10, 0, 1_000_000_000, false).description
+    }
+
+    /// Stereoscopic releases, in the shapes the original's pattern covers.
+    #[test]
+    fn stereoscopic_releases_are_labelled() {
+        for name in [
+            "Avatar.2009.3D.1080p.BluRay.HUN",
+            "Gravity.2013.1080p.HSBS.BluRay.HUN",
+            "Titanic.1997.1080p.HOU.BluRay.HUN",
+            "Dune.2021.1080p.Half-SBS.BluRay.HUN",
+            "Dune.2021.1080p.Half.OU.BluRay.HUN",
+        ] {
+            assert!(
+                badge_of(name).contains("3D"),
+                "not labelled as 3D: {name}"
+            );
+        }
+    }
+
+    /// And the things that must not be read as 3D. A flat release with a number in it, or a
+    /// group whose name happens to start with the same letters.
+    #[test]
+    fn flat_releases_are_not_labelled_3d() {
+        for name in [
+            "Film.2009.1080p.BluRay.x264-D3D",
+            "Film.2160p.HDR10.WEB-DL.HUN",
+            "Sorozat.S03D01.HUN.DVDRip",
+        ] {
+            assert!(
+                !badge_of(name).contains("3D"),
+                "wrongly labelled as 3D: {name}"
+            );
+        }
+    }
+
+    /// The streaming service, which is the whole reason this group exists: seeing it before
+    /// clicking is what stops a download of something already paid for.
+    #[test]
+    fn the_streaming_service_is_on_the_badge() {
+        for (name, service) in [
+            ("The.Whisper.Man.2026.2160p.NF.WEB-DL.DDP5.1.Atmos.H.264-FULCRUM", "Netflix"),
+            ("The.Gabby.Petito.Story.2022.1080p.HBO.WEB-DL.DDP.2.0.H264", "HBO Max"),
+            ("MAO.S01E22.1080p.DSNP.WEB-DL.AAC2.0.H.264-Kitsune", "Disney+"),
+            ("Backrooms.2026.AMZN.WEBRip.x264.HUN-FULCRUM", "Amazon"),
+            ("Film.2025.1080p.ATVP.WEB-DL.HUN", "Apple TV+"),
+            ("Film.2025.1080p.PMTP.WEB-DL.HUN", "Paramount+"),
+            ("Film.2025.1080p.SKST.WEB-DL.HUN", "SkyShowtime"),
+        ] {
+            let badge = badge_of(name);
+            assert!(badge.contains(service), "{service} missing from {badge:?} for {name}");
+        }
+    }
+
+    /// A two-letter tag inside a group name is not a service. This is the case the dotted
+    /// pattern exists for: `NF` is Netflix between separators and nothing at all inside a word.
+    #[test]
+    fn a_service_tag_inside_a_word_is_not_a_service() {
+        for name in [
+            "Film.2026.1080p.WEB-DL.HUN-NFHD",
+            "Film.2026.1080p.WEB-DL.HUN.READ.NFO",
+            "Sorozat.S01.HUN.WEBRip-AMZNIA",
+        ] {
+            assert!(
+                !badge_of(name).contains("🍿"),
+                "wrongly read as a streaming service: {name}"
+            );
+        }
+    }
+
+    /// Editions land in the detail lines, where the original puts them, not on the badge.
+    #[test]
+    fn editions_are_shown_in_the_details() {
+        for (name, label) in [
+            ("Dune.2021.IMAX.2160p.WEB-DL.HUN", "IMAX"),
+            ("LOTR.2001.Extended.1080p.BluRay.HUN", "Bővített"),
+            ("Blade.Runner.1982.Directors.Cut.1080p.HUN", "Rendezői változat"),
+            ("Film.1997.REMASTERED.1080p.BluRay.HUN", "Felújított"),
+            ("Film.2010.UNRATED.1080p.BluRay.HUN", "Vágatlan"),
+            ("Film.2012.Open.Matte.1080p.WEB-DL.HUN", "Open Matte"),
+            ("Film.2015.Special.Edition.1080p.BluRay.HUN", "Különkiadás"),
+        ] {
+            let details = details_of(name);
+            assert!(details.contains(label), "{label} missing from {details:?}");
+            assert!(
+                !badge_of(name).contains(label),
+                "{label} belongs in the details, not the badge"
+            );
+        }
+    }
 
     /// Every pattern has to compile; a typo would otherwise silently match nothing.
     #[test]
