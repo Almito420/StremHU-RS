@@ -179,6 +179,36 @@ impl BithumenClient {
         parse_browse(&body, &self.base)
     }
 
+    /// The same page, plus whether there is another one after it.
+    ///
+    /// The browse page has no machine-readable total, but it does print a pager: `1 - 15 |
+    /// 16 - 30 | 31 - 43`, with the later ranges as links carrying their own `page=`. The
+    /// largest of those is the last page, and that is what makes a walk across a long series
+    /// possible at all. X-Faktor is forty-three rows at fifteen to a page, so two thirds of it
+    /// were on pages nobody ever asked for.
+    pub async fn search_page(
+        &self,
+        query: &str,
+        page: u32,
+    ) -> Result<crate::ncore::SearchPage> {
+        let mut url = self.base.join(BROWSE_PATH)?;
+        url.query_pairs_mut()
+            .append_pair("genre", "0")
+            .append_pair("search", query)
+            .append_pair("page", &page.max(1).saturating_sub(1).to_string());
+
+        let body = self.get(url).await?.text().await.context("reading body")?;
+        let torrents = parse_browse(&body, &self.base)?;
+        // The site counts from zero and this counts from one, so the pager's largest value is
+        // one less than the number of pages.
+        let last_page = last_page_of(&body).map(|p| p + 1).unwrap_or(page);
+        Ok(crate::ncore::SearchPage {
+            total_results: 0,
+            next_page: (page < last_page).then_some(page + 1),
+            torrents,
+        })
+    }
+
     /// The tracker's own list of torrents that still owe seeding.
     ///
     /// Returns the torrent id and how long it still has to run, which the site does print: its
@@ -408,6 +438,28 @@ pub fn parse_browse(html: &str, base: &Url) -> Result<Vec<Torrent>> {
     Ok(out)
 }
 
+/// The largest `page=` the pager offers, which is the last page of this result set.
+///
+/// Zero-based, as the site writes it. None when there is no pager at all, which is what a
+/// single page of results looks like and is correctly read as "there is no next one".
+fn last_page_of(html: &str) -> Option<u32> {
+    let mut highest: Option<u32> = None;
+    for part in html.split("page=").skip(1) {
+        let digits: String = part.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let Ok(value) = digits.parse::<u32>() else {
+            continue;
+        };
+        // A pager that claims thousands of pages is a link that is not a pager. The walk has
+        // its own ceiling, but reading a wild number here would make every page look like a
+        // middle one and hide the real end of the list.
+        if value > 5_000 {
+            continue;
+        }
+        highest = Some(highest.map_or(value, |h: u32| h.max(value)));
+    }
+    highest
+}
+
 /// The site's own way of saying there was nothing.
 fn looks_like_no_results(html: &str) -> bool {
     let lower = html.to_lowercase();
@@ -553,34 +605,60 @@ fn find_size(text: &str) -> Option<u64> {
 /// and when they do not — a column added, a layout changed — the last two whole numbers in the
 /// row are taken instead, which is where a TBDev table keeps them. Guessing zero seeders would
 /// be worse than either: the ranking drops a release with none.
+/// The seeder and leecher counts, found by what the cells contain rather than by counting
+/// columns from the left.
+///
+/// Counting columns is the thing that breaks silently when a tracker adds one, and this site
+/// has: the live header now reads `Típus | Név | Pontszám | Fileok | Komm. | Feltöltve |
+/// Méret | DLs | Seed | VL/Leech`, and the `Pontszám` column is one the fixed index knew
+/// nothing about. With it there, index seven is the completed-download count, so every row
+/// reported its all-time download total as its seeder count. We want nothing from that column;
+/// we only have to not be moved by it.
+///
+/// The shape is unmistakable. The leecher cell is the only one written `x / y`, real leechers
+/// and all leechers, and the seeder cell is the one immediately before it. The size is already
+/// read this way, and for the same reason.
 fn swarm(cells: &[String]) -> (u64, u64) {
-    const SEEDERS: usize = 7;
-    const LEECHERS: usize = 8;
-    let whole = |i: usize| -> Option<u64> {
-        cells
-            .get(i)
-            .and_then(|c| c.replace([' ', ',', '\u{a0}'], "").parse::<u64>().ok())
+    let number = |text: &str| -> Option<u64> {
+        text.replace([' ', ',', '\u{a0}'], "").parse::<u64>().ok()
     };
-    // The leecher cell is not a plain number: the live page writes `0 / 0`, real leechers and
-    // all leechers. The first of the two is the one that matters, and taking the cell whole
-    // failed, which then dragged the seeder count into the fallback with it.
-    let first_number = |i: usize| -> Option<u64> {
-        let cell = cells.get(i)?;
-        let digits: String = cell
+    /// `0 / 0`: digits, one slash, digits, and nothing else.
+    fn is_pair(text: &str) -> bool {
+        let cleaned: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        match cleaned.split_once('/') {
+            Some((a, b)) => {
+                !a.is_empty()
+                    && !b.is_empty()
+                    && a.chars().all(|c| c.is_ascii_digit())
+                    && b.chars().all(|c| c.is_ascii_digit())
+            }
+            None => false,
+        }
+    }
+
+    let leech_index = cells.iter().position(|c| is_pair(c));
+    if let Some(i) = leech_index {
+        let leechers = cells[i]
             .chars()
             .skip_while(|c| !c.is_ascii_digit())
             .take_while(|c| c.is_ascii_digit())
-            .collect();
-        digits.parse().ok()
-    };
-
-    if let Some(seeders) = whole(SEEDERS) {
-        return (seeders, first_number(LEECHERS).unwrap_or(0));
+            .collect::<String>()
+            .parse()
+            .unwrap_or(0);
+        // The cell before it, and only if it really is a plain number: a row where the pair is
+        // the first cell has no seeder column to its left.
+        let seeders = i
+            .checked_sub(1)
+            .and_then(|j| cells.get(j))
+            .and_then(|c| number(c))
+            .unwrap_or(0);
+        return (seeders, leechers);
     }
-    let numbers: Vec<u64> = cells
-        .iter()
-        .filter_map(|c| c.replace([' ', ',', '\u{a0}'], "").parse::<u64>().ok())
-        .collect();
+
+    // No `x / y` anywhere: an older layout, or a row shaped differently. The last two plain
+    // numbers are the swarm, which is what this fell back on before and is still the best
+    // available guess.
+    let numbers: Vec<u64> = cells.iter().filter_map(|c| number(c)).collect();
     match numbers.len() {
         0 => (0, 0),
         1 => (numbers[0], 0),

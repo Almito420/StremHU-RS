@@ -416,6 +416,33 @@ pub struct PlayEvent {
     pub title: String,
 }
 
+/// Where a release can be fetched from, remembered so a play request can act on it.
+///
+/// This has to survive a restart, and that is not a refinement. Stremio does not re-ask for
+/// the stream list before every playback: it remembers the URL it was given and opens it
+/// again, which is what the "next episode" button does. Kept only in memory, every one of
+/// those links died the moment the server restarted, and the viewer got nothing until they
+/// went back to the series page to make Stremio ask again. Measured on the live client, not
+/// deduced: four such requests arrived after a restart and all four were answered with a
+/// refusal.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct StoredSource {
+    /// Which tracker offered it, and therefore which session can fetch the `.torrent`.
+    pub tracker: String,
+    pub download_url: String,
+    pub size_bytes: u64,
+    /// When it was last handed out or looked up, so the oldest can be dropped first.
+    pub used_at: Unix,
+}
+
+/// How many play sources are kept.
+///
+/// The eviction used to empty the whole map when it filled up, which meant every link the
+/// viewer had open died at the same moment, in the middle of an evening. One at a time, oldest
+/// first, is the only behaviour that does not do that.
+pub const SOURCE_LIMIT: usize = 2000;
+
 /// How many sittings are kept. Enough to cover a season or two of evenings, and small
 /// enough that the file stays something a person can open and read.
 const HISTORY_LIMIT: usize = 500;
@@ -439,6 +466,11 @@ pub struct State {
     /// The date alone cannot throttle the run that happens at startup: restarting the server
     /// six times in an afternoon would mean asking the tracker six times and six notifications.
     pub last_sweep_at: Unix,
+    /// Play sources, keyed by the play id, which carries the tracker as well as the number.
+    pub sources: BTreeMap<String, StoredSource>,
+    /// When the recommended catalogue was last built, so a restart does not rebuild it and
+    /// the daily sweep knows whether it still owes one.
+    pub catalog_built_at: Unix,
 }
 
 pub struct Store {
@@ -820,6 +852,69 @@ impl Store {
         self.dirty.store(true, Ordering::Relaxed);
     }
 
+    /// Remembers where a release can be fetched from, so a later play request can act on it.
+    ///
+    /// Written into the state file like everything else that has to outlive a restart. The
+    /// alternative, a map in memory, is what made every remembered Stremio link stop working
+    /// after an update.
+    pub async fn remember_source(
+        &self,
+        play_id: &str,
+        tracker: &str,
+        download_url: &str,
+        size_bytes: u64,
+    ) {
+        let mut state = self.state.write().await;
+        state.sources.insert(
+            play_id.to_string(),
+            StoredSource {
+                tracker: tracker.to_string(),
+                download_url: download_url.to_string(),
+                size_bytes,
+                used_at: now(),
+            },
+        );
+        // Oldest first, and only the surplus. Emptying the map would kill every link at once.
+        while state.sources.len() > SOURCE_LIMIT {
+            let Some(oldest) = state
+                .sources
+                .iter()
+                .min_by_key(|(_, s)| s.used_at)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            state.sources.remove(&oldest);
+        }
+        drop(state);
+        self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// The source for a play id, if one was ever recorded.
+    ///
+    /// Looking one up counts as using it, so a series being watched keeps its place in the
+    /// map ahead of a title somebody opened once and never played.
+    pub async fn source(&self, play_id: &str) -> Option<StoredSource> {
+        let mut state = self.state.write().await;
+        let found = state.sources.get_mut(play_id).map(|s| {
+            s.used_at = now();
+            s.clone()
+        })?;
+        drop(state);
+        self.dirty.store(true, Ordering::Relaxed);
+        Some(found)
+    }
+
+    /// When the recommended catalogue was last built.
+    pub async fn catalog_built_at(&self) -> Unix {
+        self.state.read().await.catalog_built_at
+    }
+
+    pub async fn set_catalog_built_at(&self, at: Unix) {
+        self.state.write().await.catalog_built_at = at;
+        self.dirty.store(true, Ordering::Relaxed);
+    }
+
     /// Writes the file when something changed. Atomic, so an interrupted write cannot
     /// destroy the record of what is on disk.
     pub async fn flush(&self) -> Result<()> {
@@ -930,7 +1025,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_seeding_clock_belongs_to_the_torrent() {
-        let now = 1_000_000u64;
+        let now = 10_000_000u64;
         let first = Item {
             info_hash: "pack".into(),
             file_index: 1,

@@ -76,6 +76,35 @@ struct MovieDetails {
     imdb_id: Option<String>,
 }
 
+/// What `/find` answers with. Only the two lists we can use are named; the rest of the
+/// response is ignored rather than refused, because a strict struct would turn a field TMDB
+/// adds later into a failure.
+#[derive(Debug, Default, Deserialize)]
+struct FindResults {
+    #[serde(default)]
+    movie_results: Vec<FindEntry>,
+    #[serde(default)]
+    tv_results: Vec<FindEntry>,
+}
+
+/// One entry from `/find`. A series and a film name their fields differently, and both
+/// spellings are optional here so the same struct reads either list.
+#[derive(Debug, Default, Deserialize)]
+struct FindEntry {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    original_name: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    original_title: Option<String>,
+    #[serde(default)]
+    first_air_date: Option<String>,
+    #[serde(default)]
+    release_date: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct ExternalIds {
     #[serde(default)]
@@ -146,6 +175,58 @@ impl TmdbClient {
             original_name: details.original_name,
             year: year_of(details.first_air_date.as_deref()),
         })
+    }
+
+    /// Turns an IMDb id back into its titles.
+    ///
+    /// Stremio sends a bare `tt` id for anything with an IMDb entry, and that id carries no
+    /// title at all. Without this the ladder had only its first rung for such a request: an
+    /// exact search that finds nothing, and then nothing else to try. With it, "tt0412142"
+    /// becomes "Dr. House" and "House", which is what the trackers actually name their files
+    /// after.
+    ///
+    /// The response shape is measured against the live API, not assumed: `/find` answers with
+    /// `movie_results` and `tv_results` beside three other lists, and the entries carry
+    /// `name`/`original_name` for a series and `title`/`original_title` for a film.
+    ///
+    /// None when TMDB simply does not know the id. That is not an error: plenty of things have
+    /// an IMDb entry and no TMDB one, and the ladder just has one rung fewer.
+    pub async fn find_by_imdb(&self, imdb_id: &str, series: bool) -> Result<Option<Title>> {
+        let id = imdb_id.trim();
+        // Pasted into a URL, so it has to be the shape it claims to be.
+        if !id.starts_with("tt") || !id[2..].chars().all(|c| c.is_ascii_digit()) || id.len() < 3 {
+            bail!("{imdb_id:?} is not an IMDb id");
+        }
+        let found: FindResults = self
+            .get_json(&format!("/find/{id}?external_source=imdb_id"), true)
+            .await?;
+
+        // The kind that was asked for first, and the other only if that is empty: a title can
+        // appear in both lists, and answering a series request with the film of the same name
+        // would send the search after the wrong thing.
+        let (first, second) = if series {
+            (&found.tv_results, &found.movie_results)
+        } else {
+            (&found.movie_results, &found.tv_results)
+        };
+        let Some(entry) = first.first().or_else(|| second.first()) else {
+            return Ok(None);
+        };
+
+        Ok(Some(Title {
+            imdb_id: Some(id.to_string()),
+            name: entry.name.clone().unwrap_or_else(|| entry.title.clone().unwrap_or_default()),
+            original_name: entry
+                .original_name
+                .clone()
+                .unwrap_or_else(|| entry.original_title.clone().unwrap_or_default()),
+            year: year_of(
+                entry
+                    .first_air_date
+                    .as_deref()
+                    .or(entry.release_date.as_deref()),
+            ),
+        }))
     }
 
     pub async fn movie(&self, tmdb_id: &str) -> Result<Title> {

@@ -8,16 +8,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 
 use crate::config::Config;
 use crate::library::Library;
 use crate::ncore::NcoreClient;
 
-/// nCore download URLs carry the account passkey, so they cannot be rebuilt from a
-/// torrent id alone. Stremio always asks for the stream list before playing, so the
-/// list handler records what it found and the play handler looks it up here.
-pub(crate) const SOURCE_CACHE_LIMIT: usize = 512;
 
 pub(crate) struct AppState {
     pub(crate) lib: Arc<Library>,
@@ -36,8 +32,9 @@ pub(crate) struct AppState {
     /// Bumped on every save so the background loops know to re-read the configuration
     /// without cloning it on every pass.
     pub(crate) cfg_generation: Arc<std::sync::atomic::AtomicU64>,
-    /// What the stream list found, kept so the play handler can act on it.
-    pub(crate) sources: Mutex<HashMap<String, Source>>,
+    /// Search results by title, kept for a few minutes so an evening on one series does not
+    /// walk the ladder again for every episode.
+    pub(crate) searches: tokio::sync::Mutex<std::collections::HashMap<String, CachedSearch>>,
     pub(crate) ui: crate::webui::Ui,
     /// What was downloaded and how much of it was watched. Survives restarts.
     pub(crate) store: Arc<crate::state::Store>,
@@ -322,15 +319,57 @@ impl AppState {
     }
 }
 
-/// How nCore should be searched for a request.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SearchPlan {
-    /// Exact match on an IMDb id: no false positives.
-    Imdb(String),
-    /// Titles to try in order, used when the work has no IMDb entry at all. Many
-    /// Hungarian series are in that position, which is why this path exists.
-    Names(Vec<String>),
+/// Everything known about a title that a tracker can be asked with.
+///
+/// Both handles at once, not one or the other. The IMDb id is the exact one and is tried
+/// first, but a search that finds nothing on it is not the end: nCore carries no IMDb id at
+/// all on many Hungarian uploads, and the title still finds them. The old shape chose one of
+/// the two up front and could never fall back, which is why an IMDb search that came up short
+/// simply lost.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SearchPlan {
+    /// Exact match, when the work has an IMDb entry: no false positives.
+    pub(crate) imdb: Option<String>,
+    /// Titles to try in order. Many Hungarian series have no IMDb entry at all, and for the
+    /// rest these are the second chance when the id finds nothing.
+    pub(crate) names: Vec<String>,
 }
+
+impl SearchPlan {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.imdb.is_none() && self.names.is_empty()
+    }
+
+    /// What this plan is filed under in the search cache. The title, not the episode: the
+    /// whole series comes back in one answer and every episode is served from it.
+    pub(crate) fn cache_key(&self) -> String {
+        match &self.imdb {
+            Some(imdb) => format!("imdb:{imdb}"),
+            None => format!("name:{}", self.names.join("|").to_lowercase()),
+        }
+    }
+}
+
+/// A search result kept for a moment, so a series being watched is not searched for again on
+/// every episode.
+pub(crate) struct CachedSearch {
+    pub(crate) torrents: Vec<crate::tracker::Torrent>,
+    /// Refreshed on every hit, not set once. An evening spent on one series keeps its list
+    /// warm for the whole evening; a title opened once and abandoned falls out on its own.
+    pub(crate) touched: std::time::Instant,
+}
+
+/// How long a search result stays usable without being asked for again.
+///
+/// Ten minutes, refreshed on every use. This exists because the ladder is no longer one
+/// request: a title that is genuinely absent walks four rungs, and Stremio asks again for
+/// every episode. It is short enough that a release uploaded during the evening is found by
+/// the time the next episode is reached.
+const SEARCH_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// How many titles are kept. A household watches a handful of things at once.
+const SEARCH_CACHE_LIMIT: usize = 64;
+
 
 impl AppState {
     /// Keyed by the play id, which carries the tracker: both sites number their torrents
@@ -343,16 +382,69 @@ impl AppState {
         download_url: &str,
         size_bytes: u64,
     ) {
-        let mut map = self.sources.lock().await;
-        if map.len() >= SOURCE_CACHE_LIMIT {
-            map.clear();
+        self.store
+            .remember_source(
+                &tracker.play_id(torrent_id),
+                tracker.id(),
+                download_url,
+                size_bytes,
+            )
+            .await;
+    }
+
+    /// The remembered result for this plan, when it is still warm.
+    ///
+    /// Only whole-title results are cached, so this is keyed by the plan and not by the
+    /// episode. The ranking and filtering happen after this returns, which means a setting
+    /// changed in the interface takes effect at once rather than waiting for the entry to age
+    /// out.
+    pub(crate) async fn cached_search(
+        &self,
+        plan: &SearchPlan,
+        _req: &crate::stremio::StreamRequest,
+    ) -> Option<Vec<crate::tracker::Torrent>> {
+        let mut map = self.searches.lock().await;
+        let key = plan.cache_key();
+        let entry = map.get_mut(&key)?;
+        if entry.touched.elapsed() > SEARCH_CACHE_TTL {
+            map.remove(&key);
+            return None;
+        }
+        entry.touched = std::time::Instant::now();
+        Some(entry.torrents.clone())
+    }
+
+    /// Remembers a search that actually found something.
+    ///
+    /// An empty result is deliberately not kept. "Nothing was found" is the one answer worth
+    /// asking again for, because the reason may simply be that nobody had uploaded it yet.
+    pub(crate) async fn cache_search(
+        &self,
+        plan: &SearchPlan,
+        _req: &crate::stremio::StreamRequest,
+        torrents: &[crate::tracker::Torrent],
+    ) {
+        if torrents.is_empty() {
+            return;
+        }
+        let mut map = self.searches.lock().await;
+        // Oldest first, one at a time. Emptying the map would make every open series pay for a
+        // fresh ladder at the same moment.
+        while map.len() >= SEARCH_CACHE_LIMIT {
+            let Some(oldest) = map
+                .iter()
+                .min_by_key(|(_, e)| e.touched)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            map.remove(&oldest);
         }
         map.insert(
-            tracker.play_id(torrent_id),
-            Source {
-                tracker,
-                download_url: download_url.to_string(),
-                size_bytes,
+            plan.cache_key(),
+            CachedSearch {
+                torrents: torrents.to_vec(),
+                touched: std::time::Instant::now(),
             },
         );
     }
@@ -392,8 +484,18 @@ impl AppState {
         None
     }
 
+    /// Where a play id can be fetched from.
+    ///
+    /// Read out of the store, so it survives a restart. Stremio opens a remembered play URL
+    /// without re-asking for the stream list, and every one of those used to fail after an
+    /// update because this lived only in memory.
     pub(crate) async fn source_for(&self, torrent_id: &str) -> Option<Source> {
-        self.sources.lock().await.get(torrent_id).cloned()
+        let stored = self.store.source(torrent_id).await?;
+        Some(Source {
+            tracker: crate::tracker::Tracker::from_id(&stored.tracker),
+            download_url: stored.download_url,
+            size_bytes: stored.size_bytes,
+        })
     }
 
     /// Fetches the tracker's list of open seeding obligations and caches it.

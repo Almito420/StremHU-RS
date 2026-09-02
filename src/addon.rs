@@ -54,35 +54,33 @@ pub(crate) async fn stream_list(
         }
     };
 
-    let mut found = run_search(&state, &plan).await;
-
-    // The second tracker, and only now. The rule is the user's and it is not a preference: ask
-    // BitHUmen when nCore had nothing to offer for this title, and not otherwise. nCore is the
-    // account with the history on it, so a hit there is the answer; a search that ended with an
-    // empty stream list is the one case where a second tracker can add anything.
+    // The finished list for this title, from the cache when it is still warm.
     //
-    // "Nothing to offer" is measured on the finished list, after the filters: three hits that
-    // are all the wrong episode, or all below the seeder floor, leave the viewer with the same
-    // empty list as no hits at all. A search that *failed* is a different matter and is left
-    // alone here, because an unreachable tracker is not a tracker without the film.
-    if rank_candidates(&found, &req, &cfg.filters).is_empty() {
-        let fallback = run_fallback_search(&state, &plan).await;
-        if !fallback.is_empty() {
-            tracing::info!(
-                id = %raw_id,
-                hits = fallback.len(),
-                "nCore had nothing for this title; BitHUmen answered"
-            );
-            found = fallback;
+    // Stremio asks again for every episode of a series, and with the ladder behind it that is
+    // no longer one request per ask. Only a list that answered is kept: a title nothing was
+    // found for is asked again next time, because the reason may simply be that nobody had
+    // uploaded it yet.
+    let searched = std::time::Instant::now();
+    let (found, rung) = match state.cached_search(&plan, &req).await {
+        Some(hit) => (hit, "cache"),
+        None => {
+            let (found, rung) = run_ladder(&state, &plan, &req, &cfg.filters).await;
+            if !found.is_empty() {
+                state.cache_search(&plan, &req, &found).await;
+            }
+            (found, rung)
         }
-    }
+    };
     let usable = rank_candidates(&found, &req, &cfg.filters);
 
     tracing::info!(
         id = %raw_id,
-        plan = ?plan,
+        imdb = ?plan.imdb,
+        names = ?plan.names,
+        rung,
         found = found.len(),
         usable = usable.len(),
+        took_ms = searched.elapsed().as_millis() as u64,
         "search finished"
     );
 
@@ -173,7 +171,17 @@ pub(crate) async fn build_search_plan(
     req: &stremio::StreamRequest,
 ) -> Result<SearchPlan> {
     match &req.meta {
-        MetaId::Imdb(id) => Ok(SearchPlan::Imdb(id.clone())),
+        // A bare IMDb id is all Stremio sends for anything with an IMDb entry, and it carries
+        // no title. TMDB can turn one back into a title, which is what gives this request the
+        // second rung of the ladder; without a key, or when the lookup fails, the ladder is
+        // simply shorter and nothing else changes.
+        MetaId::Imdb(id) => {
+            let names = title_for_imdb(state, kind_of(kind, req), id).await;
+            Ok(SearchPlan {
+                imdb: Some(id.clone()),
+                names,
+            })
+        }
         MetaId::Tmdb(id) => {
             // The read guard is held across the lookups; it only blocks a settings
             // save, which is rare and can wait.
@@ -190,90 +198,293 @@ pub(crate) async fn build_search_plan(
                 tmdb.movie(id).await?
             };
 
-            match &title.imdb_id {
-                Some(imdb) => {
-                    tracing::info!(tmdb = %id, imdb = %imdb, "resolved to an IMDb id");
-                    Ok(SearchPlan::Imdb(imdb.clone()))
-                }
-                None => {
-                    let terms = title.search_terms();
-                    if terms.is_empty() {
-                        anyhow::bail!("TMDB {id} has neither an IMDb id nor a usable title");
-                    }
-                    tracing::info!(tmdb = %id, ?terms, "no IMDb entry, searching by name");
-                    Ok(SearchPlan::Names(terms))
-                }
+            // Both, not one or the other. The IMDb id is the exact handle and is tried
+            // first, but nCore carries no IMDb id on a great many Hungarian uploads, and for
+            // those the title is the only thing that will ever find them. Keeping only the id
+            // here is what made an IMDb search that came up short the end of the road.
+            let names = title.search_terms();
+            let plan = SearchPlan {
+                imdb: title.imdb_id.clone(),
+                names,
+            };
+            if plan.is_empty() {
+                anyhow::bail!("TMDB {id} has neither an IMDb id nor a usable title");
             }
+            tracing::info!(tmdb = %id, imdb = ?plan.imdb, names = ?plan.names, "search plan");
+            Ok(plan)
         }
     }
 }
 
-/// Runs the plan, stopping at the first search that returns anything. Trying every
-/// name even after a hit would only add unrelated results from a looser title.
-pub(crate) async fn run_search(state: &AppState, plan: &SearchPlan) -> Vec<Torrent> {
-    match plan {
-        SearchPlan::Imdb(imdb) => match state
-            .ncore
-            .read()
-            .await
-            .search(crate::ncore::SEARCH_BY_IMDB, imdb, 1)
-            .await
-        {
-            Ok(r) => r.torrents,
-            Err(e) => {
-                tracing::warn!(error = %e, imdb = %imdb, "nCore imdb search failed");
-                Vec::new()
-            }
-        },
-        SearchPlan::Names(terms) => {
-            for term in terms {
-                match state
-                    .ncore
-                    .read()
-                    .await
-                    .search(crate::ncore::SEARCH_BY_NAME, term, 1)
-                    .await
-                {
-                    Ok(r) if !r.torrents.is_empty() => return r.torrents,
-                    Ok(_) => tracing::info!(term = %term, "no hits, trying the next title"),
-                    Err(e) => tracing::warn!(error = %e, term = %term, "nCore name search failed"),
-                }
-            }
+/// Whether this request is for a series, however it arrived.
+fn kind_of(kind: &str, req: &stremio::StreamRequest) -> bool {
+    kind == "series" || req.is_episode()
+}
+
+/// The titles for an IMDb id, so a request that arrived as one still has a name to fall back
+/// on. An empty list when TMDB is not configured or does not know it: the ladder then has one
+/// rung fewer per tracker, which is exactly the behaviour there was before.
+async fn title_for_imdb(state: &AppState, series: bool, imdb: &str) -> Vec<String> {
+    let guard = state.tmdb.read().await;
+    let Some(tmdb) = guard.as_ref() else {
+        return Vec::new();
+    };
+    match tmdb.find_by_imdb(imdb, series).await {
+        Ok(Some(title)) => title.search_terms(),
+        Ok(None) => Vec::new(),
+        Err(e) => {
+            tracing::warn!(error = %e, imdb = %imdb, "could not turn the IMDb id into a title");
             Vec::new()
         }
     }
 }
 
-/// The same plan on the second tracker, when there is one and it is switched on.
+/// How many result pages one search may walk.
 ///
-/// Only ever called after the first tracker's answer turned out to be empty, so there is no
-/// gate here beyond having a client: the decision has already been made by the caller. An empty
-/// result and a failure both come back as an empty list, because to the viewer they are the
-/// same thing at this point — the difference has already been used up on nCore, where a failure
-/// must not send the search on.
-pub(crate) async fn run_fallback_search(state: &AppState, plan: &SearchPlan) -> Vec<Torrent> {
-    let guard = state.bithumen.read().await;
-    let Some(client) = guard.as_ref() else {
-        return Vec::new();
-    };
+/// Measured against the live trackers rather than guessed. nCore answers a hundred rows a
+/// page: an IMDb search is small (twenty-three rows for a series with eight seasons, one
+/// page), but a title search is not, and "House" alone returns six and a half thousand rows
+/// across sixty-seven pages. BitHUmen answers fifteen rows a page, and forty-three for
+/// X-Faktor, which is three pages. Twenty pages covers every real case on both and still puts
+/// a ceiling on a title so common that walking all of it would be traffic for nothing.
+const MAX_SEARCH_PAGES: u32 = 20;
 
-    let terms: Vec<String> = match plan {
-        SearchPlan::Imdb(imdb) => vec![imdb.clone()],
-        SearchPlan::Names(names) => names.clone(),
+/// How many pages in a row may add no new copy of the wanted episode before the walk stops.
+///
+/// A release and its re-encodes sit next to each other in any ordering a tracker offers, so
+/// once two pages running have added nothing new for this episode there is nothing more to
+/// find. Stopping at the first hit instead would take away the choice between a 720p and a
+/// 2160p copy of the same episode; walking to the ceiling every time would be twenty requests
+/// for an answer that was complete after two.
+const PAGES_WITHOUT_NEW: u32 = 2;
+
+/// The episode a request is for, when it is for one.
+pub(crate) fn wanted_episode(req: &stremio::StreamRequest) -> Option<crate::series::SeasonEpisode> {
+    match (req.season, req.episode) {
+        (Some(season), Some(episode)) => Some(crate::series::SeasonEpisode { season, episode }),
+        _ => None,
+    }
+}
+
+/// How many of these releases name the wanted episode outright.
+fn exact_copies(found: &[Torrent], want: Option<crate::series::SeasonEpisode>) -> usize {
+    let Some(se) = want else {
+        return 0;
     };
-    for term in terms {
-        match client.search(&term, 1).await {
-            Ok(hits) if !hits.is_empty() => return hits,
-            Ok(_) => tracing::info!(term = %term, "BitHUmen has nothing for this term"),
+    found
+        .iter()
+        .filter(|t| {
+            crate::series::match_episode(t.title.as_deref().unwrap_or(""), se)
+                == Some(crate::series::Match::Exact)
+        })
+        .count()
+}
+
+/// Whether this rung of the ladder produced something the viewer could press play on.
+///
+/// Deliberately measured on the finished, filtered list rather than on the raw hit count.
+/// Three results for the right series but the wrong episode leave the viewer with the same
+/// empty screen as no results at all, so they must not stop the ladder. This is the rule the
+/// second tracker was already gated on; the ladder now applies it at every step.
+fn answers_the_request(
+    found: &[Torrent],
+    req: &stremio::StreamRequest,
+    filters: &crate::config::Filters,
+) -> bool {
+    !rank_candidates(found, req, filters).is_empty()
+}
+
+/// The narrowed query for an episode request: the title and its season.
+///
+/// Measured on nCore: "House" returns six thousand six hundred rows across sixty-seven pages,
+/// "House S05" returns thirty-four on one. The season is as far as it can usefully go, because
+/// "House S05E12" returns nothing at all: the episode lives inside a season pack whose name
+/// never carries the episode number. So the season is the narrow end of what actually works.
+fn narrowed(term: &str, want: Option<crate::series::SeasonEpisode>) -> Option<String> {
+    let se = want?;
+    Some(format!("{term} S{:02}", se.season))
+}
+
+/// One search term walked across pages for as long as it is worth it.
+///
+/// The walk stops when the tracker runs out, when the ceiling is reached, or when the pages
+/// stop adding copies of the wanted episode.
+async fn walk<F, Fut>(
+    label: &'static str,
+    term: &str,
+    want: Option<crate::series::SeasonEpisode>,
+    mut fetch: F,
+) -> Vec<Torrent>
+where
+    F: FnMut(String, u32) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<crate::ncore::SearchPage>>,
+{
+    let mut out: Vec<Torrent> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut barren = 0u32;
+    let mut page = 1u32;
+
+    loop {
+        let found = match fetch(term.to_string(), page).await {
+            Ok(f) => f,
             Err(e) => {
-                tracing::warn!(error = %e, term = %term, "BitHUmen search failed");
-                // A tracker that answered with an error will answer the next term the same
-                // way; trying every title against a broken session is traffic for nothing.
-                return Vec::new();
+                tracing::warn!(error = %e, tracker = label, term = %term, page, "search failed");
+                break;
+            }
+        };
+        let next = found.next_page;
+        let before = exact_copies(&out, want);
+        // A tracker that clamps an over-large page number serves one it has already given us.
+        // Counting only what is new makes that look like the end of the list, which it is.
+        let fresh: Vec<Torrent> = found
+            .torrents
+            .into_iter()
+            .filter(|t| seen.insert(t.tracker.owed_key(&t.torrent_id)))
+            .collect();
+        if fresh.is_empty() {
+            break;
+        }
+        out.extend(fresh);
+
+        // Only an episode request has a reason to want another page. A film's copies are all
+        // uploaded within days of each other and sit together wherever the tracker puts them.
+        if want.is_none() {
+            break;
+        }
+        if exact_copies(&out, want) > before {
+            barren = 0;
+        } else {
+            barren += 1;
+            if barren >= PAGES_WITHOUT_NEW {
+                break;
             }
         }
+        match next {
+            Some(n) if page < MAX_SEARCH_PAGES => page = n,
+            _ => break,
+        }
     }
-    Vec::new()
+    if page > 1 {
+        tracing::info!(tracker = label, term = %term, pages = page, hits = out.len(), "walked");
+    }
+    out
+}
+
+/// Runs the ladder: the exact handle first, the title second, and the second tracker only
+/// after both of those came up short on the first.
+///
+/// Each rung is reached only because the one before it did not answer the request, so nothing
+/// here is speculative traffic. The narrowed round in front of each title walk is the one
+/// exception: one request, and when it lands it saves the twenty behind it.
+///
+/// Returns which rung answered, because that is the thing worth having in the log when
+/// somebody asks why a particular episode could or could not be played.
+pub(crate) async fn run_ladder(
+    state: &AppState,
+    plan: &SearchPlan,
+    req: &stremio::StreamRequest,
+    filters: &crate::config::Filters,
+) -> (Vec<Torrent>, &'static str) {
+    let want = wanted_episode(req);
+
+    // nCore, by IMDb id. Small and exact: measured at twenty-three rows for an eight-season
+    // series, so this is one request in the ordinary case.
+    if let Some(imdb) = &plan.imdb {
+        let found = walk("ncore", imdb, want, |term, page| async move {
+            state
+                .ncore
+                .read()
+                .await
+                .search(crate::ncore::SEARCH_BY_IMDB, &term, page)
+                .await
+        })
+        .await;
+        if answers_the_request(&found, req, filters) {
+            return (found, "ncore/imdb");
+        }
+    }
+
+    // nCore, by title. Many Hungarian uploads carry no IMDb id at all, so this is not a
+    // fallback for odd cases: for a Hungarian series it is usually the rung that answers.
+    for term in &plan.names {
+        if let Some(narrow) = narrowed(term, want) {
+            let found = walk("ncore", &narrow, want, |term, page| async move {
+                state
+                    .ncore
+                    .read()
+                    .await
+                    .search(crate::ncore::SEARCH_BY_NAME, &term, page)
+                    .await
+            })
+            .await;
+            if answers_the_request(&found, req, filters) {
+                return (found, "ncore/name-narrow");
+            }
+        }
+        let found = walk("ncore", term, want, |term, page| async move {
+            state
+                .ncore
+                .read()
+                .await
+                .search(crate::ncore::SEARCH_BY_NAME, &term, page)
+                .await
+        })
+        .await;
+        if answers_the_request(&found, req, filters) {
+            return (found, "ncore/name");
+        }
+    }
+
+    // BitHUmen, and only now. The rule is the owner's and it is not a preference: the account
+    // with fifteen years of history on it is asked first, and the second tracker is for the
+    // title it does not have.
+    if state.bithumen.read().await.is_none() {
+        return (Vec::new(), "nothing");
+    }
+    // It does answer an IMDb id, measured: eleven rows for tt0412142, every one of them
+    // carrying that id. So this rung is worth having and not a formality.
+    if let Some(imdb) = &plan.imdb {
+        let found = walk("bithumen", imdb, want, |term, page| async move {
+            bithumen_page(state, &term, page).await
+        })
+        .await;
+        if answers_the_request(&found, req, filters) {
+            return (found, "bithumen/imdb");
+        }
+    }
+    for term in &plan.names {
+        if let Some(narrow) = narrowed(term, want) {
+            let found = walk("bithumen", &narrow, want, |term, page| async move {
+                bithumen_page(state, &term, page).await
+            })
+            .await;
+            if answers_the_request(&found, req, filters) {
+                return (found, "bithumen/name-narrow");
+            }
+        }
+        let found = walk("bithumen", term, want, |term, page| async move {
+            bithumen_page(state, &term, page).await
+        })
+        .await;
+        if answers_the_request(&found, req, filters) {
+            return (found, "bithumen/name");
+        }
+    }
+
+    (Vec::new(), "nothing")
+}
+
+/// One page of BitHUmen, in the shape the walk expects.
+async fn bithumen_page(
+    state: &AppState,
+    term: &str,
+    page: u32,
+) -> anyhow::Result<crate::ncore::SearchPage> {
+    let guard = state.bithumen.read().await;
+    let client = guard
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("BitHUmen is switched off"))?;
+    client.search_page(term, page).await
 }
 
 /// Keeps what can actually be played and orders it.

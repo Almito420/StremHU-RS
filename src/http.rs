@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use axum::Router;
 use axum::http::{Method, header};
 use axum::routing::{get, post};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 
 use crate::app::*;
 use crate::ui::*;
@@ -132,10 +132,10 @@ pub async fn serve() -> Result<()> {
         ncore: RwLock::new(ncore),
         bithumen: RwLock::new(bithumen),
         tmdb: RwLock::new(tmdb),
+        searches: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         cfg: shared_cfg,
         cfg_path: path.clone(),
         cfg_generation,
-        sources: Mutex::new(HashMap::new()),
         ui: crate::webui::Ui::default(),
         store: store.clone(),
         owed: RwLock::new(OwedSnapshot::default()),

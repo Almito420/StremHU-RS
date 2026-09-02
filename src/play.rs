@@ -59,6 +59,9 @@ pub(crate) async fn play(
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
+    // The cold-start clock. Every stage below reports how long it took, because "playback
+    // took ten seconds" is not a finding and "the tracker fetch took 1.75 of them" is.
+    let began = std::time::Instant::now();
     let Some(source) = state.source_for(&torrent_id).await else {
         // Only reachable if a play URL is opened without the stream list having been
         // fetched first, for example a stale bookmark after a restart.
@@ -78,11 +81,24 @@ pub(crate) async fn play(
         return range_response(state, entry, &cfg, method, headers);
     }
 
+    // The .torrent already on the disk, when there is one.
+    //
+    // Every torrent that has been played is written into the torrents folder, and the second
+    // episode of a season pack is the same torrent as the first. Asking the tracker for a file
+    // we are already holding is a network round trip in front of a waiting viewer, and it is
+    // the largest single item in a cold start before the first piece is even requested:
+    // measured at 1.75 seconds on a live start against nCore.
+    let cached = local_torrent_for(&state, &torrent_id).await;
+    let from_disk = cached.is_some();
+    let looked_on_disk = began.elapsed();
     // Fetched with the session that belongs to the site the link came from. A download URL
     // carries an account's passkey, so the two are not interchangeable: asking nCore for a
     // BitHUmen link would send one account's cookies to the other site and get a login page
     // back for the trouble.
-    let fetched = match source.tracker {
+    let fetched = if let Some(bytes) = cached {
+        Ok(bytes)
+    } else {
+        match source.tracker {
         crate::tracker::Tracker::Ncore => {
             state
                 .ncore
@@ -97,6 +113,7 @@ pub(crate) async fn play(
                 "BitHUmen is switched off, so this stream cannot be fetched"
             )),
         },
+        }
     };
     let bytes = match fetched {
         Ok(b) => b,
@@ -113,6 +130,8 @@ pub(crate) async fn play(
                 .into_response();
         }
     };
+
+    let have_torrent = began.elapsed();
 
     // How much will actually be written, which is not the size of the torrent.
     //
@@ -224,6 +243,8 @@ pub(crate) async fn play(
     // The library answers with the record's key, not the info hash: one torrent can serve
     // several files, so the key carries the file index too. What goes into the record is the
     // hash itself, from the entry, or the key ends up with the index in it twice.
+    let disks_decided = began.elapsed();
+
     let (_key, entry) = match state.lib.add(&bytes, want, &save_dir).await {
         Ok(pair) => pair,
         Err(e) => {
@@ -231,6 +252,8 @@ pub(crate) async fn play(
             return (StatusCode::UNPROCESSABLE_ENTITY, format!("{e}\n")).into_response();
         }
     };
+
+    let opened = began.elapsed();
 
     // A new download is when the free space actually changes, so this is when it is worth
     // looking. The warning is rate limited, so it cannot turn into a message per film.
@@ -265,7 +288,49 @@ pub(crate) async fn play(
         })
         .await;
 
+    tracing::info!(
+        file = %entry.file_name,
+        from_disk,
+        looked_on_disk_ms = looked_on_disk.as_millis() as u64,
+        torrent_ms = have_torrent.saturating_sub(looked_on_disk).as_millis() as u64,
+        disks_ms = disks_decided.saturating_sub(have_torrent).as_millis() as u64,
+        engine_ms = opened.saturating_sub(disks_decided).as_millis() as u64,
+        total_ms = began.elapsed().as_millis() as u64,
+        "cold start"
+    );
     range_response(state, entry, &cfg, method, headers)
+}
+
+/// The `.torrent` for this tracker id, read from the folder we saved it in.
+///
+/// The records already know the info hash for anything that has been played, and the file is
+/// named by that hash, so a torrent we have handled before needs nothing from the network. A
+/// season pack is the case this exists for: every episode after the first is the same torrent,
+/// and every one of them used to pay for its own download from the tracker.
+///
+/// Anything unreadable or that does not look like a torrent falls through to the tracker, so a
+/// truncated file costs one fetch rather than a playback.
+async fn local_torrent_for(state: &Arc<AppState>, torrent_id: &str) -> Option<Vec<u8>> {
+    let dir = state.config().await.storage.torrent_files_dir.clone();
+    for key in state.store.keys_for_tracker_id(torrent_id).await {
+        let hash = key.split(':').next().unwrap_or_default();
+        if hash.is_empty() {
+            continue;
+        }
+        let path = std::path::Path::new(&dir).join(format!("{hash}.torrent"));
+        let Ok(bytes) = tokio::fs::read(&path).await else {
+            continue;
+        };
+        // A bencoded torrent starts with a dictionary marker. Anything else is a leftover or a
+        // half-written file, and handing it to the engine would fail later and less clearly.
+        if !bytes.starts_with(b"d") {
+            tracing::warn!(path = %path.display(), "the saved torrent is not readable; asking the tracker");
+            continue;
+        }
+        tracing::debug!(path = %path.display(), "using the saved .torrent instead of asking the tracker");
+        return Some(bytes);
+    }
+    None
 }
 
 /// Writes the `.torrent` next to the others, named by info hash. Returns the path, or

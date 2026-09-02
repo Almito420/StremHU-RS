@@ -160,6 +160,15 @@ pub struct Entry {
     /// Pieces that currently carry a deadline, so the loop can clear stale ones.
     active_deadlines: Mutex<BTreeSet<u32>>,
     streaming: Mutex<bool>,
+    /// When a reader was last attached, so the streaming connection limit can be held for a
+    /// moment after the last one goes.
+    ///
+    /// Measured on a real start: the player reads the container header, asks for the seek index
+    /// at the far end of the file, gives up waiting and closes both connections, then comes
+    /// back four seconds later to play. Dropping to the idle limit in that gap made libtorrent
+    /// disconnect peers to get down to it, and they all had to be found again, in the middle of
+    /// the one moment the viewer is waiting on.
+    last_reader_at: Mutex<std::time::Instant>,
     /// Every wanted piece is on disk. Once true, the loop stops re-reading the piece map for
     /// this torrent unless somebody is watching it.
     complete: RwLock<bool>,
@@ -732,7 +741,12 @@ impl Library {
                 );
             }
         }
-        torrent.set_max_connections(cfg.torrent.connections_while_idle)?;
+        // The streaming limit, not the idle one, and this is the moment it matters. A torrent
+        // is only added here because a play request arrived, so it is about to want every peer
+        // it can get; opening it on the idle limit meant the swarm was built at the narrowest
+        // setting during the seconds the viewer was actually waiting, and only widened
+        // afterwards, once the deadline loop noticed a reader had appeared.
+        torrent.set_max_connections(cfg.torrent.connections_while_streaming)?;
         torrent.resume()?;
 
         let span = FileSpan::from_offsets(file.offset, file.size, piece_len);
@@ -756,6 +770,7 @@ impl Library {
             next_reader_id: AtomicU64::new(1),
             active_deadlines: Mutex::new(BTreeSet::new()),
             streaming: Mutex::new(false),
+            last_reader_at: Mutex::new(std::time::Instant::now()),
             complete: RwLock::new(false),
             extras_promoted: AtomicBool::new(false),
         });
@@ -777,6 +792,14 @@ impl Library {
 /// that the first byte range of a new playback waits no longer than one pass before the
 /// deadlines start aiming at it.
 const IDLE_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// How long a torrent keeps its streaming connection limit after the last reader goes.
+///
+/// Forty-five seconds, which is longer than any gap a player leaves between closing one
+/// request and opening the next. The cost of being wrong in this direction is a few idle
+/// connections for under a minute; the cost of being wrong in the other direction was
+/// measured at four and a half seconds of dead air in the middle of a start.
+const STREAMING_GRACE: Duration = Duration::from_secs(45);
 
 /// Re-applies deadlines for every open torrent. Deadlines expire, so this has to
 /// keep running; and it is the only place that talks to libtorrent about ordering,
@@ -823,7 +846,19 @@ async fn deadline_loop(lib: Arc<Library>) {
                 })
                 .collect();
 
-            let streaming = !heads.is_empty();
+            // "Being watched" is held for a grace period past the last reader. A player closes
+            // and reopens connections constantly: at the start it takes the header, jumps to
+            // the seek index, gives up and comes back; on every seek it does the same. Treating
+            // each of those gaps as "nobody is watching" tore the swarm down and rebuilt it.
+            let has_reader = !heads.is_empty();
+            let mut last_reader = entry.last_reader_at.lock().await;
+            if has_reader {
+                *last_reader = std::time::Instant::now();
+            }
+            let streaming = has_reader || last_reader.elapsed() < STREAMING_GRACE;
+            drop(last_reader);
+            // The loop still has to come round promptly while the grace period is running, or
+            // the drop back to idle would happen a whole idle interval late.
             anyone_reading |= streaming;
 
             // The piece bitmap crosses the language boundary and allocates a vector the
