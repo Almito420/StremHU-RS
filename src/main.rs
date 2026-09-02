@@ -37,6 +37,7 @@ mod addon;
 mod alerts;
 mod bithumen;
 mod app;
+mod catalog;
 mod config;
 mod disk;
 mod engine;
@@ -399,6 +400,11 @@ async fn run(command: &str, args: &mut impl Iterator<Item = String>) -> Result<(
         }
         // The addon server: Stremio talks to it, and it opens torrents on demand.
         "serve" => http::serve().await,
+        // The recommended page, written out so its shape can be checked against the live site
+        // rather than assumed. The catalogue is built from this page, and a page that changes
+        // under us should show up here as a missing figure rather than as a catalogue that
+        // quietly says less than it used to.
+        "recommended" => recommended_probe(args.next()).await,
         "tmdb" => {
             let kind = args.next().context("usage: tmdb <tv|movie> <id>")?;
             let id = args.next().context("usage: tmdb <tv|movie> <id>")?;
@@ -534,6 +540,64 @@ async fn tmdb_probe(kind: &str, id: &str) -> Result<()> {
         None => println!("imdb_id       : none  -> nCore has to be searched by name"),
     }
     println!("search terms  : {:?}", title.search_terms());
+    Ok(())
+}
+
+/// Builds the recommended catalogue on the command line and prints what it made of the page.
+///
+/// The same three steps the server takes, one after the other and each one visible: what the
+/// tracker's page said, what the release names were cleaned back to, and what TMDB could place.
+/// A page that is rearranged shows up here as an empty list rather than as a catalogue that
+/// quietly says less than it used to.
+///
+/// With a path argument the raw page is written out as well, for when the parser and the page
+/// disagree and only the bytes can settle it.
+async fn recommended_probe(dump_to: Option<String>) -> Result<()> {
+    let mut cfg = config::Config::load(&config::Config::path_from_env())?;
+    cfg.apply_env_overrides();
+
+    let client = ncore::NcoreClient::new(&cfg.ncore.username, &cfg.ncore.password)?;
+    client.login().await?;
+    let html = client.recommended().await?;
+    if let Some(path) = &dump_to {
+        std::fs::write(path, &html).with_context(|| format!("writing {path}"))?;
+        println!("a nyers oldal: {} bájt -> {path}", html.len());
+    }
+
+    let tmdb = if cfg.tmdb.api_key.trim().is_empty() {
+        println!("\nA tmdb.api_key nincs beállítva, tehát csak a nyers sorok látszanak.\n");
+        None
+    } else {
+        Some(tmdb::TmdbClient::new(&cfg.tmdb.api_key, &cfg.tmdb.language)?)
+    };
+
+    for kind in [catalog::Kind::Film, catalog::Kind::Series] {
+        let rows = catalog::parse_recommended(&html, kind);
+        println!("\n=== {} ===  {} sor", kind.title(), rows.len());
+        for row in rows.iter().take(catalog::ROWS_PER_CATALOGUE) {
+            let (title, year) = catalog::title_of(&row.release);
+            print!(
+                "  id={:<9} {:<38} -> {:?} {}",
+                row.torrent_id,
+                row.release.chars().take(38).collect::<String>(),
+                title,
+                year.map(|y| y.to_string()).unwrap_or_else(|| "-".into())
+            );
+            match &tmdb {
+                None => println!(),
+                Some(client) => {
+                    match client
+                        .catalogue_entry(&title, year, kind == catalog::Kind::Series)
+                        .await
+                    {
+                        Ok(Some(meta)) => println!("  ==> {} [{}]", meta.name, meta.id),
+                        Ok(None) => println!("  ==> a TMDB nem ismeri"),
+                        Err(e) => println!("  ==> TMDB hiba: {e}"),
+                    }
+                }
+            }
+        }
+    }
     Ok(())
 }
 

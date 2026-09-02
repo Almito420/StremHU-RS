@@ -85,6 +85,22 @@ pub(crate) async fn network_view(state: &AppState, cfg: &Config) -> crate::webui
         ),
     };
 
+    // The same base as the streaming addon, with the catalogue's own manifest under it, so
+    // whichever address actually works is the one offered for both.
+    let catalog_url = addon_url.replace("/manifest.json", "/catalog/manifest.json");
+    let catalog_state = match state.catalog.built_at().await {
+        0 => "Az Ajánló még nem készült el. Induláskor épül fel, utána naponta egyszer,               a takarítás idejében."
+            .to_string(),
+        at => {
+            let films = state.catalog.rows(crate::catalog::Kind::Film).await.len();
+            let series = state.catalog.rows(crate::catalog::Kind::Series).await.len();
+            let hours = crate::state::now().saturating_sub(at) / 3600;
+            format!(
+                "Az Ajánló megvan: {films} film és {series} sorozat, {hours} órája frissült."
+            )
+        }
+    };
+
     let https_state = match (&host, https_live) {
         (Some(host), true) => {
             let cert = crate::tls::Cache::new(&cfg.network.cert_cache_dir).load();
@@ -110,6 +126,8 @@ pub(crate) async fn network_view(state: &AppState, cfg: &Config) -> crate::webui
 
     crate::webui::NetworkView {
         addon_url,
+        catalog_url,
+        catalog_state,
         reachable_elsewhere,
         https_state,
         host_ip: cfg.network.host_ip.clone(),

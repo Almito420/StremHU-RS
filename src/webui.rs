@@ -816,6 +816,12 @@ const LOGIN_FORM: &str = include_str!("templates/login.html");
 pub struct NetworkView {
     /// The URL to paste into Stremio, already complete with the key.
     pub addon_url: String,
+    /// The catalogue addon's own URL. A second addon on purpose: Stremio remembers what an
+    /// installed one can do, so folding the catalogue into the first would mean re-adding it
+    /// on every device before it appeared.
+    pub catalog_url: String,
+    /// One sentence on whether the catalogue has been built and when.
+    pub catalog_state: String,
     /// Whether that URL will work from another device.
     pub reachable_elsewhere: bool,
     /// One sentence on the state of HTTPS.
@@ -835,6 +841,8 @@ impl NetworkView {
     fn fill(&self, template: &str) -> String {
         template
             .replace("{{addon_url}}", &html_escape(&self.addon_url))
+            .replace("{{catalog_url}}", &html_escape(&self.catalog_url))
+            .replace("{{catalog_state}}", &html_escape(&self.catalog_state))
             .replace("{{https_state}}", &html_escape(&self.https_state))
             .replace("{{host_ip}}", &html_escape(&self.host_ip))
             .replace("{{https_port}}", &html_escape(&self.https_port))
@@ -1084,6 +1092,8 @@ mod tests {
     fn network_view() -> NetworkView {
         NetworkView {
             addon_url: "https://192-168-1-100.local-ip.medicmobile.org:3443/key/manifest.json".into(),
+            catalog_url: "https://192-168-1-100.local-ip.medicmobile.org:3443/key/catalog/manifest.json".into(),
+            catalog_state: "Az Ajánló még nem készült el.".into(),
             reachable_elsewhere: true,
             https_state: "HTTPS is running.".into(),
             host_ip: "192.168.1.100".into(),

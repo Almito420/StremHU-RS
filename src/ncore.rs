@@ -22,6 +22,8 @@ const BASE_URL: &str = "https://ncore.pro";
 const LOGIN_PATH: &str = "/login.php";
 const TORRENTS_PATH: &str = "/torrents.php";
 const HITNRUN_PATH: &str = "/hitnrun.php";
+/// The tracker's own front page of what is worth watching.
+const RECOMMENDED_PATH: &str = "/recommended.php";
 
 /// One open seeding obligation, as the tracker reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -334,11 +336,7 @@ impl NcoreClient {
 
     /// Searches nCore, best-seeded first. `page` is 1-based. `miben` selects which
     /// field is matched; use [`SEARCH_BY_IMDB`] for an IMDb id.
-    pub async fn search(&self, miben: &str, query: &str, page: u32) -> Result<SearchPage> {
-        self.search_in(miben, query, page, &[]).await
-    }
-
-    /// The same search, narrowed to a set of categories.
+    /// A search, optionally narrowed to a set of categories.
     ///
     /// An episode request has no business walking through films, and on a common title that is
     /// the difference between one page and sixty-seven.
@@ -394,6 +392,19 @@ impl NcoreClient {
                 None
             },
         })
+    }
+
+    /// The recommended page, as the tracker serves it.
+    ///
+    /// Read as HTML because there is no JSON for it: this page is part of the site's own
+    /// interface rather than of its search API.
+    pub async fn recommended(&self) -> Result<String> {
+        let url = self.base.join(RECOMMENDED_PATH)?;
+        self.get(url)
+            .await?
+            .text()
+            .await
+            .context("reading the recommended page")
     }
 
     /// The tracker's own list of torrents that still owe seed time.

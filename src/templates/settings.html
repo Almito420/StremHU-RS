@@ -15,6 +15,13 @@
     gombbal ellenőrizheted, hogy a szerver válaszol. A fenti mezőre kattintva kijelölődik az URL.</p>
   <p class="note">{{addon_note}}</p>
   <p class="note">{{https_state}}</p>
+
+  <label for="cu">Ajánló katalógus URL</label>
+  <input id="cu" value="{{catalog_url}}" readonly onclick="this.select()">
+  <p class="note">Külön kiegészítő, a lejátszástól függetlenül adható hozzá és távolítható el.
+    Az nCore ajánlójából mutatja a legaktívabb filmeket és sorozatokat, magyar címmel és
+    borítóval. A lejátszáshoz nem kell: az a fenti címen megy.</p>
+  <p class="note">{{catalog_state}}</p>
 </div>
 
 <form method="post" action="/ui/save-network" class="card">

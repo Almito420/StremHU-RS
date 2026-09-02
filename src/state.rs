@@ -906,10 +906,11 @@ impl Store {
     }
 
     /// When the recommended catalogue was last built.
-    pub async fn catalog_built_at(&self) -> Unix {
-        self.state.read().await.catalog_built_at
-    }
-
+    ///
+    /// Written down but not used to decide anything: the catalogue itself is held in memory
+    /// and is empty after a restart, so a restart rebuilds it whatever this says. It is here
+    /// because "when did this last work" is the first question asked of a scheduled job that
+    /// looks like it has stopped.
     pub async fn set_catalog_built_at(&self, at: Unix) {
         self.state.write().await.catalog_built_at = at;
         self.dirty.store(true, Ordering::Relaxed);

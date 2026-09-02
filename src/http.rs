@@ -132,6 +132,7 @@ pub async fn serve() -> Result<()> {
         ncore: RwLock::new(ncore),
         bithumen: RwLock::new(bithumen),
         tmdb: RwLock::new(tmdb),
+        catalog: crate::catalog::Cache::default(),
         searches: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         cfg: shared_cfg,
         cfg_path: path.clone(),
@@ -166,6 +167,7 @@ pub async fn serve() -> Result<()> {
     // by how the machine feels.
     crate::app::spawn_problem_reporter(state.clone(), crate::alerts::channel());
     crate::app::spawn_watchdog(state.clone());
+    crate::app::spawn_catalog_builder(state.clone());
 
     crate::maintenance::spawn(
         Arc::new(ServerWorld {
@@ -210,6 +212,10 @@ pub async fn serve() -> Result<()> {
     let addon = Router::new()
         .route("/{api_key}/manifest.json", get(manifest))
         .route("/{api_key}/stream/{kind}/{id}", get(stream_list))
+        // The catalogue addon: its own manifest, so adding it does not disturb the streaming
+        // one that is already installed on the televisions.
+        .route("/{api_key}/catalog/manifest.json", get(catalog_manifest))
+        .route("/{api_key}/catalog/{kind}/{id}", get(catalog_list))
         .route("/{api_key}/play/{torrent_id}", get(play_movie).head(play_movie))
         .route(
             "/{api_key}/play/{torrent_id}/{season}/{episode}",

@@ -29,6 +29,43 @@ pub(crate) async fn manifest(
     axum::Json(m).into_response()
 }
 
+/// The catalogue addon's own manifest.
+///
+/// A second addon rather than a second resource on the first one. Stremio remembers what an
+/// installed addon can do, so adding a catalogue to the streaming manifest would mean removing
+/// and re-adding it on every device before the catalogue appeared, television included.
+pub(crate) async fn catalog_manifest(
+    State(state): State<Arc<AppState>>,
+    Path(api_key): Path<String>,
+) -> Response {
+    if !authorised(&state.config().await, &api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    axum::Json(stremio::catalog_manifest(env!("CARGO_PKG_VERSION"))).into_response()
+}
+
+/// One catalogue: `/catalog/{type}/{id}.json`.
+///
+/// Answers from what was built, and never builds on the way: a viewer opening Stremio must not
+/// wait on a tracker page and thirty TMDB lookups. An empty list is the honest answer before
+/// the first build has run, and Stremio shows the row as empty rather than as broken.
+pub(crate) async fn catalog_list(
+    State(state): State<Arc<AppState>>,
+    Path((api_key, _kind, id)): Path<(String, String, String)>,
+) -> Response {
+    if !authorised(&state.config().await, &api_key) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let id = id.strip_suffix(".json").unwrap_or(&id);
+    let Some(kind) = crate::catalog::Kind::from_id(id) else {
+        tracing::warn!(id = %id, "unknown catalogue");
+        return axum::Json(stremio::CatalogResponse { metas: Vec::new() }).into_response();
+    };
+    let metas = state.catalog.rows(kind).await;
+    tracing::info!(catalogue = kind.id(), rows = metas.len(), "catalogue served");
+    axum::Json(stremio::CatalogResponse { metas }).into_response()
+}
+
 /// Stremio requests `/stream/{type}/{id}.json`; the `.json` suffix arrives as part
 /// of the last path segment.
 pub(crate) async fn stream_list(

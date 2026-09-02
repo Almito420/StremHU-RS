@@ -88,8 +88,9 @@ pub struct Manifest {
     pub description: String,
     pub resources: Vec<String>,
     pub types: Vec<String>,
-    /// Empty: catalogues are somebody else's job, but the field is required.
-    pub catalogs: Vec<serde_json::Value>,
+    /// Empty on the streaming addon, which offers no browsing; filled on the catalogue
+    /// addon, which offers nothing else.
+    pub catalogs: Vec<CatalogEntry>,
     #[serde(rename = "idPrefixes")]
     pub id_prefixes: Vec<String>,
     #[serde(rename = "behaviorHints")]
@@ -119,6 +120,90 @@ pub fn manifest(name: &str, version: &str) -> Manifest {
         id_prefixes: vec!["tt".to_string(), "tmdb:".to_string()],
         behavior_hints: BehaviorHints {
             p2p: true,
+            configurable: false,
+        },
+    }
+}
+
+/// One row of a catalogue.
+///
+/// Filed under an IMDb id, which is what makes the rest of it work: Stremio fills in the
+/// detail page from its own metadata addon, and the stream request that follows comes back to
+/// us with an id our search already understands.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct Meta {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub name: String,
+    pub poster: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(rename = "releaseInfo", skip_serializing_if = "Option::is_none")]
+    pub release_info: Option<String>,
+}
+
+impl Clone for Meta {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            kind: self.kind.clone(),
+            name: self.name.clone(),
+            poster: self.poster.clone(),
+            description: self.description.clone(),
+            release_info: self.release_info.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct CatalogResponse {
+    pub metas: Vec<Meta>,
+}
+
+/// What the manifest says about one catalogue.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct CatalogEntry {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub id: String,
+    pub name: String,
+}
+
+/// The manifest for the catalogue addon, which is deliberately a second addon.
+///
+/// Stremio remembers what an installed addon can do. Adding a catalogue to the streaming
+/// manifest would mean removing and re-adding it on every device before the catalogue showed
+/// up, television included. Published separately, the working installation is left alone and
+/// the catalogue can be added, or removed, on its own.
+pub fn catalog_manifest(version: &str) -> Manifest {
+    Manifest {
+        id: "hu.stremhu.rs.catalog".to_string(),
+        version: version.to_string(),
+        name: "StremHU rs Ajánló".to_string(),
+        description: "Az nCore ajánlója böngészhető formában: a legaktívabb filmek és \
+                      sorozatok, magyar címmel és borítóval."
+            .to_string(),
+        resources: vec!["catalog".to_string()],
+        types: vec!["movie".to_string(), "series".to_string()],
+        catalogs: vec![
+            CatalogEntry {
+                kind: "movie".to_string(),
+                id: crate::catalog::Kind::Film.id().to_string(),
+                name: crate::catalog::Kind::Film.title().to_string(),
+            },
+            CatalogEntry {
+                kind: "series".to_string(),
+                id: crate::catalog::Kind::Series.id().to_string(),
+                name: crate::catalog::Kind::Series.title().to_string(),
+            },
+        ],
+        // Rows are filed under IMDb ids, and that is what makes the rest work: Stremio fills
+        // in the detail page from its own metadata addon, and the stream request that follows
+        // arrives at the other addon with an id its search already understands.
+        id_prefixes: vec!["tt".to_string()],
+        behavior_hints: BehaviorHints {
+            p2p: false,
             configurable: false,
         },
     }

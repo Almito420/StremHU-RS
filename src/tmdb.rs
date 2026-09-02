@@ -76,6 +76,37 @@ struct MovieDetails {
     imdb_id: Option<String>,
 }
 
+/// Where TMDB serves its cover art from, at the width a catalogue row shows.
+///
+/// Measured rather than assumed: the path from the search result appended to this returns the
+/// image, and the same path at a size that does not exist returns a 404.
+const POSTER_BASE: &str = "https://image.tmdb.org/t/p/w500";
+
+/// Percent-encodes a query for a URL.
+///
+/// Written out rather than pulled in: the only thing that needs encoding here is a title, the
+/// set of characters that must not pass through is small and fixed, and everything else in
+/// this file builds its URLs the same way.
+fn urlencoding_lite(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    for byte in text.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+/// What a `/search` answers with. Only the fields a catalogue row needs are named.
+#[derive(Debug, Default, Deserialize)]
+struct SearchResults {
+    #[serde(default)]
+    results: Vec<FindEntry>,
+}
+
 /// What `/find` answers with. Only the two lists we can use are named; the rest of the
 /// response is ignored rather than refused, because a strict struct would turn a field TMDB
 /// adds later into a failure.
@@ -91,6 +122,12 @@ struct FindResults {
 /// spellings are optional here so the same struct reads either list.
 #[derive(Debug, Default, Deserialize)]
 struct FindEntry {
+    #[serde(default)]
+    id: u64,
+    #[serde(default)]
+    poster_path: Option<String>,
+    #[serde(default)]
+    overview: Option<String>,
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
@@ -138,7 +175,13 @@ impl TmdbClient {
     ) -> Result<T> {
         // Built by hand so the API key and language are the only query parameters and
         // reqwest handles the percent-encoding of the path.
-        let mut url = format!("{BASE}{path}?api_key={}", self.api_key);
+        //
+        // The separator is chosen rather than assumed. Some of these paths carry a query of
+        // their own, and appending a second question mark produced a URL the API answered
+        // with "invalid API key": the key was there, but as part of the previous parameter's
+        // value. Measured, not deduced, and it made every catalogue row fail.
+        let joiner = if path.contains('?') { '&' } else { '?' };
+        let mut url = format!("{BASE}{path}{joiner}api_key={}", self.api_key);
         if with_language {
             url.push_str("&language=");
             url.push_str(&self.language);
@@ -226,6 +269,67 @@ impl TmdbClient {
                     .as_deref()
                     .or(entry.release_date.as_deref()),
             ),
+        }))
+    }
+
+    /// One catalogue row: a title from a release name turned into something Stremio can show.
+    ///
+    /// Two lookups. The search gives the localised title and the cover; the external ids give
+    /// the IMDb id, which is what the row is filed under so that clicking it lands on a page
+    /// Stremio already knows how to fill in, and so the stream request comes back to us with
+    /// an id our own search understands.
+    ///
+    /// None when TMDB does not know it, or knows it but has no IMDb id or no cover for it. A
+    /// row with a blank square and a filename under it is worse than one row fewer.
+    pub async fn catalogue_entry(
+        &self,
+        title: &str,
+        year: Option<u32>,
+        series: bool,
+    ) -> Result<Option<crate::stremio::Meta>> {
+        let kind = if series { "tv" } else { "movie" };
+        let mut path = format!(
+            "/search/{kind}?query={}",
+            urlencoding_lite(title)
+        );
+        if let Some(year) = year {
+            // The year is a hint, not a filter, and it is what tells two films of the same
+            // name apart.
+            let field = if series { "first_air_date_year" } else { "year" };
+            path.push_str(&format!("&{field}={year}"));
+        }
+        let found: SearchResults = self.get_json(&path, true).await?;
+        let Some(entry) = found.results.first() else {
+            return Ok(None);
+        };
+        let Some(poster) = entry.poster_path.as_deref().filter(|p| !p.is_empty()) else {
+            return Ok(None);
+        };
+
+        let external: ExternalIds = self
+            .get_json(&format!("/{kind}/{}/external_ids", entry.id), false)
+            .await?;
+        let Some(imdb) = clean_imdb(external.imdb_id) else {
+            return Ok(None);
+        };
+
+        Ok(Some(crate::stremio::Meta {
+            id: imdb,
+            kind: if series { "series" } else { "movie" }.to_string(),
+            name: entry
+                .name
+                .clone()
+                .or_else(|| entry.title.clone())
+                .unwrap_or_else(|| title.to_string()),
+            poster: format!("{POSTER_BASE}{poster}"),
+            description: entry.overview.clone().filter(|o| !o.is_empty()),
+            release_info: year_of(
+                entry
+                    .first_air_date
+                    .as_deref()
+                    .or(entry.release_date.as_deref()),
+            )
+            .map(|y| y.to_string()),
         }))
     }
 

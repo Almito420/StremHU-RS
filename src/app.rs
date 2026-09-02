@@ -32,6 +32,9 @@ pub(crate) struct AppState {
     /// Bumped on every save so the background loops know to re-read the configuration
     /// without cloning it on every pass.
     pub(crate) cfg_generation: Arc<std::sync::atomic::AtomicU64>,
+    /// The recommended catalogue, rebuilt once a day. Empty until the first build, so a
+    /// viewer who never browses costs nothing.
+    pub(crate) catalog: crate::catalog::Cache,
     /// Search results by title, kept for a few minutes so an evening on one series does not
     /// walk the ladder again for every episode.
     pub(crate) searches: tokio::sync::Mutex<std::collections::HashMap<String, CachedSearch>>,
@@ -218,6 +221,78 @@ pub(crate) async fn make_room_for(state: &Arc<AppState>, dir: &str, needed: u64)
     )
     .await;
     true
+}
+
+/// Builds the recommended catalogue when it is due, and says so when it could not.
+///
+/// Due means either never built or a day old. Called at startup and again from the daily
+/// sweep, which covers the machine that is left running for a week: the startup path never
+/// fires and the sweep is what keeps the shelf current.
+///
+/// On failure, exactly one retry an hour later, and a notification. Not an hourly loop: a
+/// tracker that is down stays down for longer than an hour, and a message every hour until it
+/// comes back is a worse problem than a stale catalogue.
+pub(crate) async fn build_catalog_if_due(state: &Arc<AppState>, trigger: &str) {
+    if !state.catalog.is_stale(crate::state::now()).await {
+        return;
+    }
+    match crate::catalog::refresh(state).await {
+        Ok(()) => tracing::info!(trigger, "recommended catalogue built"),
+        Err(e) => {
+            let message = format!("Az Ajánló katalógus nem készült el: {e:#}");
+            tracing::warn!("{message}");
+            if state.config().await.maintenance.notify_problems {
+                state.notify_occasionally("catalog", &message).await;
+            }
+            // One retry, and only one. Spawned so a slow tracker cannot hold up a startup or a
+            // sweep, and the flag is left unset so the retry still sees the work as due.
+            let state = state.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                if !state.catalog.is_stale(crate::state::now()).await {
+                    return;
+                }
+                match crate::catalog::refresh(&state).await {
+                    Ok(()) => tracing::info!("the recommended catalogue was built on the retry"),
+                    Err(e) => tracing::warn!(
+                        error = %format!("{e:#}"),
+                        "the recommended catalogue failed again; waiting for the next round"
+                    ),
+                }
+            });
+        }
+    }
+}
+
+/// Keeps the recommended catalogue current: once at startup, and once a day after that.
+///
+/// Two triggers, and the second exists because of the first. A machine that is restarted every
+/// few days is served entirely by the startup build; a machine left running for a fortnight
+/// would never build again, so the daily one picks it up at the same hour the sweep runs. That
+/// hour is deliberate rather than convenient: it is already the time of day this program does
+/// its housekeeping, and it is not a time anybody is likely to be watching.
+pub(crate) fn spawn_catalog_builder(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        // After the torrents are back and the first announce has gone out. The catalogue is
+        // the least urgent thing this program does and must not compete with a start.
+        tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+        build_catalog_if_due(&state, "startup").await;
+
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            let cfg = state.config().await;
+            let (hour, minute) = cfg.maintenance.sweep_time();
+            let now = chrono::Local::now();
+            use chrono::Timelike;
+            if (now.hour(), now.minute()) < (hour, minute) {
+                continue;
+            }
+            // `is_stale` inside this is what makes the minute-by-minute check harmless: past
+            // the appointed time it is asked sixty times an hour and answers no until the
+            // catalogue is actually a day old.
+            build_catalog_if_due(&state, "daily").await;
+        }
+    });
 }
 
 /// The BitHUmen client, or None when the tracker must not be contacted at all.
