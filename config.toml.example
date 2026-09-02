@@ -104,6 +104,9 @@ priority = [
     "resolution",
     "source",
 ]
+# A 3D kiadasok a lista vegere. Nem szures: valaszthato marad, csak nem az lesz,
+# amit keres nelkul megkapsz.
+three_d_last = true
 
 [tmdb]
 api_key = "a sajat TMDB kulcsod"

@@ -47,12 +47,26 @@ trackerrel — és tartalékként egy másodikkal.
 | trackerek | nCore, FileList, BitHumen, HunTorrent, Insane, Majomparade | nCore, és tartalékként BitHUmen |
 | felhasználók | többfelhasználós, jogosultságokkal | egy admin |
 
-### Metaadat: nincs saját katalógus
+### Metaadat és az Ajánló katalógus
 
-Az eredeti kiszolgál Stremio katalógus- és meta-végpontokat. Ez nem: **csak stream listát ad**,
-a címeket a TMDB addon szolgáltatja. Ennek gyakorlati oka van: a saját katalógus nem találja meg
-azokat a magyar sorozatokat, amiknek nincs IMDb azonosítója. Az "Exek csatája" ilyen, és ezért
-lett így.
+A címeket továbbra is a TMDB addon szolgáltatja, a lejátszáshoz nem kell semmi más. A 0.4.0-tól
+viszont van egy **külön katalógus kiegészítő** is: az nCore ajánló oldalának jobb oldali,
+legaktívabb listájából két böngészhető sor, film és sorozat, magyar címmel és borítóval.
+
+Külön manifest, nem a streamelő kiegészítő bővítése, és ez szándékos. A Stremio megjegyzi, mire
+képes egy telepített kiegészítő, tehát ha a katalógus a meglévő manifestbe kerülne, minden
+eszközön el kellene távolítani és újra hozzáadni, a tévén is, mielőtt megjelenne. Így a működő
+telepítés érintetlen marad, a katalógus pedig önmagában hozzáadható és eltávolítható. A címe a
+beállítások oldalon van, a streamelő cím alatt.
+
+Az ajánló lista csak torrent azonosítót és kiadásnevet ad, se borítót, se azonosítót. A program a
+nevet visszafejti címre és évre, és a TMDB-től kéri el a borítót meg az imdb azonosítót; a
+tracker saját oldalait kérdezni negyven kérés lenne egyetlen frissítésért. Frissítés induláskor,
+utána naponta egyszer a takarítás idejében; ha nem sikerül, pontosan egy pótpróba egy órával
+később és egy értesítés.
+
+Ellenőrizni a `stremhu-rs recommended` paranccsal lehet: kiírja soronként, mit olvasott ki az
+oldalból, mire fejtette vissza a nevet, és mit talált rá a TMDB.
 
 ### Fájlonkénti nyilvántartás
 
@@ -220,6 +234,28 @@ másodperc alatti puffert adott, és a stream pár másodperc után megállt. It
 - **a tartalomtípus a fájl kiterjesztéséből** jön. Egy `.avi` fájlt Matroskaként hirdetni annyi,
   hogy a lejátszó szó nélkül feladja.
 
+### Keresés: négy fokú létra, lapozással
+
+Az eredeti egy keresést futtat. Itt négy fok van, és a következő csak akkor indul, ha az előző
+**nem adott lejátszható választ a kért részre** — nem az számít, hogy jött-e bármilyen találat,
+hanem hogy a kért epizódra van-e forrás:
+
+1. nCore, imdb azonosítóval
+2. nCore, cím szerint
+3. BitHUmen, imdb azonosítóval
+4. BitHUmen, cím szerint
+
+Fokonként legfeljebb húsz oldal, és a program a pontos találat után is megy tovább, hogy a
+részhez az összes verziót összeszedje; akkor áll meg, ha két egymást követő oldal nem hozott újat.
+Filmnél egyetlen oldal jön le.
+
+A kérés kategóriára szűkítve megy, film vagy sorozat. Élőben mérve: a „House" hatezer-hatszáz sor
+szűrés nélkül, sorozatra szűkítve négyszáztizenöt, az évaddal együtt tizenhat — hatvanhét oldalról
+egyre. Kemény szűkítés, tehát egy rossz kategóriába feltöltött kiadás kiesik.
+
+Egy cím találati listája pár percig megmarad, minden újabb kérés újraindítja az óráját, üres
+eredmény viszont soha nem marad meg: azt legközelebb újra lekérdezi, hátha közben felkerült.
+
 ### Sorrend a stream listában
 
 Az eredetiben felhasználónkénti preferenciák és kizárások vannak, adatbázisban
@@ -227,6 +263,16 @@ Az eredetiben felhasználónkénti preferenciák és kizárások vannak, adatbá
 felbontás, forrás — és egy negyedik beállítás arról, hogy melyik a fontosabb, ha ütköznek
 (`filters.priority`, alapból a nyelv). Ami nincs felsorolva, az nem tűnik el, csak a felsoroltak
 után jön: egy preferencia nem szűrő. Szűrni egyedül a `min_seeders` szűr.
+
+A 3D kiadások a lista végére kerülnek (`filters.three_d_last`, alapból be). Ez sem szűrés: a 3D
+másolat választható marad, csak nem az lesz, amit valaki kérés nélkül megkap. Egy oldalankénti
+képet elindítani olyan tévén, ami nincs rá beállítva, nem rosszabb élmény, hanem rossz.
+
+A jelvényen a felbontás és a képminőség mellett ott a **3D** jelzés és a **streaming
+szolgáltató** is, tehát kattintás előtt látszik mindkettő. A szolgáltatót a tracker a névbe írja
+(`.NF.`, `.HBO.`, `.DSNP.`, `.AMZN.`, `.ATVP.`, `.PMTP.`, `.SKST.`, `.HMAX.`), és ha ott van,
+ahol amúgy is előfizető vagy, akkor nincs miért letölteni. A kiadás típusa (IMAX, bővített,
+rendezői változat és társai) a leírás harmadik sorába kerül.
 
 ### Felület
 
@@ -461,6 +507,7 @@ Minden a `config.toml`-ban van, és a fontosabbak a felületről is állítható
 | `pieces.readahead_bytes` | mennyi filmet töltsön a lejátszási fej előtt (64 MB) |
 | `pieces.partial_download` | csak a lejátszott részt töltse le, alapból ki |
 | `bithumen.enabled` | a második tracker keresése, csak ha az nCore üres, alapból ki |
+| `filters.three_d_last` | a 3D kiadások a lista végére, alapból be |
 | `torrent.max_active_torrents` | egyszerre ennyi torrent aktív, `-1` a korlátlan |
 | `torrent.complete_extras_below_bytes` | a minta és az nfo mérethatára (512 MiB), a kért fájl negyedéig |
 | `torrent.save_path_secondary` | ha az elsődleges mappa megtelt, ide ír |
