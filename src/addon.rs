@@ -64,7 +64,8 @@ pub(crate) async fn stream_list(
     let (found, rung) = match state.cached_search(&plan, &req).await {
         Some(hit) => (hit, "cache"),
         None => {
-            let (found, rung) = run_ladder(&state, &plan, &req, &cfg.filters).await;
+            let (found, rung) =
+                run_ladder(&state, &plan, &req, &cfg.filters, kind_of(&kind, &req)).await;
             if !found.is_empty() {
                 state.cache_search(&plan, &req, &found).await;
             }
@@ -384,8 +385,18 @@ pub(crate) async fn run_ladder(
     plan: &SearchPlan,
     req: &stremio::StreamRequest,
     filters: &crate::config::Filters,
+    series: bool,
 ) -> (Vec<Torrent>, &'static str) {
     let want = wanted_episode(req);
+    // An episode request has no business walking through films, and the other way round.
+    // Measured on nCore: "House" is six thousand six hundred rows unfiltered, four hundred and
+    // fifteen in the series categories alone. A hard narrowing, as the owner asked: a release
+    // filed in the wrong category is lost, and that is the trade that was chosen.
+    let categories: &[&str] = if series {
+        crate::ncore::SERIES_CATEGORIES
+    } else {
+        crate::ncore::FILM_CATEGORIES
+    };
 
     // nCore, by IMDb id. Small and exact: measured at twenty-three rows for an eight-season
     // series, so this is one request in the ordinary case.
@@ -395,7 +406,7 @@ pub(crate) async fn run_ladder(
                 .ncore
                 .read()
                 .await
-                .search(crate::ncore::SEARCH_BY_IMDB, &term, page)
+                .search_in(crate::ncore::SEARCH_BY_IMDB, &term, page, categories)
                 .await
         })
         .await;
@@ -413,7 +424,7 @@ pub(crate) async fn run_ladder(
                     .ncore
                     .read()
                     .await
-                    .search(crate::ncore::SEARCH_BY_NAME, &term, page)
+                    .search_in(crate::ncore::SEARCH_BY_NAME, &term, page, categories)
                     .await
             })
             .await;
@@ -426,7 +437,7 @@ pub(crate) async fn run_ladder(
                 .ncore
                 .read()
                 .await
-                .search(crate::ncore::SEARCH_BY_NAME, &term, page)
+                .search_in(crate::ncore::SEARCH_BY_NAME, &term, page, categories)
                 .await
         })
         .await;

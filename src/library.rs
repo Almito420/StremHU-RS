@@ -775,6 +775,27 @@ impl Library {
             extras_promoted: AtomicBool::new(false),
         });
 
+        // Both ends of the file, asked for before anybody has asked to read them.
+        //
+        // A player does the same two things at the start of every file: read the container
+        // header at the front, then jump to the seek index at the very end. Measured on a live
+        // start, the tail request arrived 1.6 seconds after the first byte range and then took
+        // over five seconds to satisfy, at which point the player gave up and reconnected. The
+        // request is entirely predictable, so there is no reason to wait for it before asking
+        // the swarm: pinning both edges here gives the tail that much of a head start.
+        if cfg.pieces.pin_file_edges {
+            for edge in [entry.span.first_piece, entry.span.last_piece] {
+                if let Err(e) = entry.torrent.set_piece_deadline(edge, 0) {
+                    tracing::debug!(piece = edge, error = %e, "could not pin a file edge");
+                }
+            }
+            entry
+                .active_deadlines
+                .lock()
+                .await
+                .extend([entry.span.first_piece, entry.span.last_piece]);
+        }
+
         self.entries.write().await.insert(key.clone(), entry.clone());
         tracing::info!(
             hash = %hash,
@@ -784,6 +805,36 @@ impl Library {
         );
         Ok((hash, entry))
     }
+}
+
+/// Drops the parts of a libtorrent message that are noise, and returns what is left.
+///
+/// The engine binds every address the machine has, so it announces to the tracker from each of
+/// them in turn: the loopback address, the link-local addresses, and whatever virtual adapter a
+/// container runtime has left behind. Every one of those fails, and none of them means
+/// anything, because the announce from the real interface is the one that counts and it
+/// succeeds. Measured on a live start, that was ten failure lines per announce round, three
+/// rounds in half a minute, in a message long enough to bury anything real.
+///
+/// Only those are dropped, and only when the address they came from cannot reach a tracker in
+/// the first place. A failure from a real interface is exactly the thing this log is for, and
+/// it comes through untouched.
+fn worth_reporting(message: &str) -> Option<String> {
+    /// The addresses a tracker can never be reached from.
+    fn unreachable_source(part: &str) -> bool {
+        ["[127.0.0.1:", "[[::1]:", "[[fe80:", "[172.", "[[fd", "[169.254."]
+            .iter()
+            .any(|prefix| part.contains(prefix))
+    }
+
+    let kept: Vec<&str> = message
+        .split(" | ")
+        .filter(|part| !unreachable_source(part))
+        .collect();
+    if kept.is_empty() {
+        return None;
+    }
+    Some(kept.join(" | "))
 }
 
 /// How long the loop waits when nothing is being watched.
@@ -1018,7 +1069,9 @@ async fn deadline_loop(lib: Arc<Library>) {
         }
 
         if let Some(err) = lib.session.pump_alerts() {
-            tracing::warn!("libtorrent: {err}");
+            if let Some(real) = worth_reporting(&err) {
+                tracing::warn!("libtorrent: {real}");
+            }
         }
 
         // Resume data asked for on an earlier tick arrives through the same alert queue,
@@ -1063,6 +1116,28 @@ async fn deadline_loop(lib: Arc<Library>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The announce failures that mean nothing are dropped, and the ones that mean something
+    /// are not. Both halves matter: a log nobody can read is the same as no log.
+    #[test]
+    fn only_unreachable_sources_are_filtered_out() {
+        let noise = "Pack (http://t.ncore.pro:2710/x/announce)[127.0.0.1:6890] v1 no such host \
+             | Pack (http://t.ncore.pro:2710/x/announce)[[::1]:6890] v1 no such host \
+             | Pack (http://t.ncore.pro:2710/x/announce)[172.26.0.1:6890] v1 unreachable network \
+             | Pack (http://t.ncore.pro:2710/x/announce)[[fe80::1%5]:6890] v1 unreachable";
+        assert_eq!(worth_reporting(noise), None, "all of this is from addresses that cannot reach a tracker");
+
+        let real = "Pack (http://t.ncore.pro:2710/x/announce)[192.168.0.13:6890] v1 401 Unauthorized";
+        assert_eq!(worth_reporting(real).as_deref(), Some(real));
+
+        // A round where the real interface also failed keeps that one line and drops the rest.
+        let mixed = format!("{noise} | {real}");
+        assert_eq!(worth_reporting(&mixed).as_deref(), Some(real));
+
+        // Anything that is not an announce report at all passes through untouched.
+        let other = "storage moved failed: access denied";
+        assert_eq!(worth_reporting(other).as_deref(), Some(other));
+    }
 
     /// Companions already on disk must not be switched on again at every start: that is work
     /// for nothing, and it makes a finished torrent report itself unfinished for a moment.

@@ -554,6 +554,16 @@ pub(crate) async fn wait_for(
 ) -> Result<()> {
     let deadline = std::time::Instant::now() + timeout;
     let mut logged = false;
+    // Short at first, then backing off to the configured interval.
+    //
+    // The configured interval is right for a wait that is going to be long: checking three
+    // times a second for a piece that is thirty seconds away is pure wakeups. It is wrong for
+    // the first moments of a wait, where the piece may land at any instant and the viewer is
+    // sitting in front of a black screen: at four hundred milliseconds, a piece that arrived
+    // just after a check was not noticed for most of half a second, every time. Starting at
+    // twenty-five milliseconds and doubling costs a handful of extra checks and gives that
+    // back.
+    let mut interval = std::time::Duration::from_millis(25).min(poll);
 
     loop {
         if entry.ready(from, to).await {
@@ -575,7 +585,8 @@ pub(crate) async fn wait_for(
                 timeout.as_secs()
             );
         }
-        tokio::time::sleep(poll).await;
+        tokio::time::sleep(interval).await;
+        interval = (interval * 2).min(poll);
     }
 }
 

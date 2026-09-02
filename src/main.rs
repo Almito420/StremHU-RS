@@ -380,7 +380,9 @@ async fn run(command: &str, args: &mut impl Iterator<Item = String>) -> Result<(
             bithumen_search(&query).await
         }
         "search" => {
-            let query = args.next().context("usage: search <query> [page] [miben]")?;
+            let query = args
+                .next()
+                .context("usage: search <query> [page] [miben] [categories]")?;
             let page: u32 = match args.next() {
                 Some(v) => v.parse().context("page must be a number")?,
                 None => 1,
@@ -390,7 +392,10 @@ async fn run(command: &str, args: &mut impl Iterator<Item = String>) -> Result<(
             let miben = args
                 .next()
                 .unwrap_or_else(|| ncore::search_field_for(&query).to_string());
-            search(&query, page, &miben).await
+            // An optional category list, comma separated, so the narrowing can be checked
+            // against the live site rather than assumed.
+            let categories = args.next().unwrap_or_default();
+            search(&query, page, &miben, &categories).await
         }
         // The addon server: Stremio talks to it, and it opens torrents on demand.
         "serve" => http::serve().await,
@@ -532,14 +537,19 @@ async fn tmdb_probe(kind: &str, id: &str) -> Result<()> {
     Ok(())
 }
 
-async fn search(query: &str, page: u32, miben: &str) -> Result<()> {
+async fn search(query: &str, page: u32, miben: &str, categories: &str) -> Result<()> {
     let mut cfg = config::Config::load(&config::Config::path_from_env())?;
     cfg.apply_env_overrides();
 
     let client = ncore::NcoreClient::new(&cfg.ncore.username, &cfg.ncore.password)?;
     client.login().await?;
 
-    let result = client.search(miben, query, page).await?;
+    let picked: Vec<&str> = categories
+        .split(',')
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .collect();
+    let result = client.search_in(miben, query, page, &picked).await?;
     println!(
         "\nmiben={miben}  mire={query}\n{} of {} hit(s), page {}{}\n",
         result.torrents.len(),

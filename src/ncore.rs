@@ -335,7 +335,21 @@ impl NcoreClient {
     /// Searches nCore, best-seeded first. `page` is 1-based. `miben` selects which
     /// field is matched; use [`SEARCH_BY_IMDB`] for an IMDb id.
     pub async fn search(&self, miben: &str, query: &str, page: u32) -> Result<SearchPage> {
-        let url = search_url(&self.base, miben, query, page)?;
+        self.search_in(miben, query, page, &[]).await
+    }
+
+    /// The same search, narrowed to a set of categories.
+    ///
+    /// An episode request has no business walking through films, and on a common title that is
+    /// the difference between one page and sixty-seven.
+    pub async fn search_in(
+        &self,
+        miben: &str,
+        query: &str,
+        page: u32,
+        categories: &[&str],
+    ) -> Result<SearchPage> {
+        let url = search_url(&self.base, miben, query, page, categories)?;
         let body = self.get(url).await?.text().await.context("reading body")?;
 
         // No hits is served as an HTML page, not as JSON, so a parse failure is
@@ -446,7 +460,13 @@ impl NcoreClient {
 /// Split out so the encoding can be asserted in a test: an accented Hungarian title
 /// has to reach nCore as correct UTF-8 percent-encoding, and getting that wrong is
 /// invisible until searches quietly return nothing.
-fn search_url(base: &Url, miben: &str, query: &str, page: u32) -> Result<Url> {
+fn search_url(
+    base: &Url,
+    miben: &str,
+    query: &str,
+    page: u32,
+    categories: &[&str],
+) -> Result<Url> {
     let mut url = base.join(TORRENTS_PATH)?;
     url.query_pairs_mut()
         .append_pair("oldal", &page.max(1).to_string())
@@ -455,8 +475,28 @@ fn search_url(base: &Url, miben: &str, query: &str, page: u32) -> Result<Url> {
         .append_pair("miszerint", "seeders")
         .append_pair("hogyan", "DESC")
         .append_pair("jsons", "true");
+    // The site's own form for "search these categories": a marker in `tipus`, and one
+    // `kivalasztott_tipus[]` per category. An empty list means every category, which is what
+    // the search did before this existed and is still what a film or an unknown kind gets.
+    if !categories.is_empty() {
+        url.query_pairs_mut()
+            .append_pair("tipus", "kivalasztottak_kozott");
+        for category in categories {
+            url.query_pairs_mut()
+                .append_pair("kivalasztott_tipus[]", category);
+        }
+    }
     Ok(url)
 }
+
+/// The categories a series lives in on this tracker, Hungarian and English, high definition
+/// and standard. Read off the live search results rather than copied from a list.
+pub const SERIES_CATEGORIES: &[&str] = &["hdser_hun", "hdser_eng", "xvidser_hun", "xvidser_eng"];
+
+/// And the categories a film lives in.
+pub const FILM_CATEGORIES: &[&str] = &[
+    "hd_hun", "hd_eng", "xvid_hun", "xvid_eng", "dvd_hun", "dvd_eng", "dvd9_hun", "dvd9_eng",
+];
 
 fn looks_like_no_results(body: &str) -> bool {
     body.contains("lista_mini_error") || body.contains("Nincs találat")
@@ -744,7 +784,7 @@ mod tests {
     #[test]
     fn an_accented_query_is_utf8_percent_encoded() {
         let base = Url::parse(BASE_URL).expect("base");
-        let url = search_url(&base, SEARCH_BY_NAME, "Exek csatája", 1).expect("builds");
+        let url = search_url(&base, SEARCH_BY_NAME, "Exek csatája", 1, &[]).expect("builds");
         let q = url.query().expect("has a query");
 
         // á is C3 A1 in UTF-8.
@@ -759,10 +799,47 @@ mod tests {
         assert_eq!(mire.as_deref(), Some("Exek csatája"));
     }
 
+    /// The category narrowing, in the shape the site's own form sends.
+    ///
+    /// Measured against the live site before it was written this way: "House" with no
+    /// narrowing is six thousand six hundred rows across sixty-seven pages, and the same
+    /// query in the series categories with its season is sixteen rows on one page. An empty
+    /// list has to stay unnarrowed, because that is what a film and an unknown kind get.
+    #[test]
+    fn a_narrowed_search_names_every_category_it_wants() {
+        let base = Url::parse(BASE_URL).expect("valid");
+        let url = search_url(&base, SEARCH_BY_NAME, "House S05", 1, SERIES_CATEGORIES)
+            .expect("builds");
+        let query = url.query().expect("has a query");
+        assert!(query.contains("tipus=kivalasztottak_kozott"));
+        for category in SERIES_CATEGORIES {
+            assert!(
+                query.contains(&format!("kivalasztott_tipus%5B%5D={category}")),
+                "{category} missing from {query}"
+            );
+        }
+
+        // Nothing asked for, nothing narrowed.
+        let wide = search_url(&base, SEARCH_BY_NAME, "House", 1, &[]).expect("builds");
+        assert!(!wide.query().expect("has a query").contains("tipus="));
+    }
+
+    /// A film and a series must not be looking in the same places, or the narrowing is
+    /// decoration.
+    #[test]
+    fn films_and_series_have_no_categories_in_common() {
+        for category in SERIES_CATEGORIES {
+            assert!(
+                !FILM_CATEGORIES.contains(category),
+                "{category} is in both lists"
+            );
+        }
+    }
+
     #[test]
     fn the_page_number_is_never_zero() {
         let base = Url::parse(BASE_URL).expect("base");
-        let url = search_url(&base, SEARCH_BY_IMDB, "tt123", 0).expect("builds");
+        let url = search_url(&base, SEARCH_BY_IMDB, "tt123", 0, &[]).expect("builds");
         assert!(url.query().expect("query").contains("oldal=1"));
     }
 
