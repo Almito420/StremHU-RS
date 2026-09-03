@@ -161,14 +161,19 @@ pub struct Entry {
     active_deadlines: Mutex<BTreeSet<u32>>,
     streaming: Mutex<bool>,
     /// When a reader was last attached, so the streaming connection limit can be held for a
-    /// moment after the last one goes.
+    /// moment after the last one goes. None until one ever has been.
     ///
     /// Measured on a real start: the player reads the container header, asks for the seek index
     /// at the far end of the file, gives up waiting and closes both connections, then comes
     /// back four seconds later to play. Dropping to the idle limit in that gap made libtorrent
     /// disconnect peers to get down to it, and they all had to be found again, in the middle of
     /// the one moment the viewer is waiting on.
-    last_reader_at: Mutex<std::time::Instant>,
+    ///
+    /// None rather than "now" at construction, and that distinction is not academic: seeded
+    /// with the current time, every torrent re-opened at startup counted as being watched for
+    /// the next three quarters of a minute, and a library of them all took the streaming
+    /// connection limit at once. Seen in the log the first time this ran.
+    last_reader_at: Mutex<Option<std::time::Instant>>,
     /// Every wanted piece is on disk. Once true, the loop stops re-reading the piece map for
     /// this torrent unless somebody is watching it.
     complete: RwLock<bool>,
@@ -770,7 +775,7 @@ impl Library {
             next_reader_id: AtomicU64::new(1),
             active_deadlines: Mutex::new(BTreeSet::new()),
             streaming: Mutex::new(false),
-            last_reader_at: Mutex::new(std::time::Instant::now()),
+            last_reader_at: Mutex::new(None),
             complete: RwLock::new(false),
             extras_promoted: AtomicBool::new(false),
         });
@@ -904,9 +909,10 @@ async fn deadline_loop(lib: Arc<Library>) {
             let has_reader = !heads.is_empty();
             let mut last_reader = entry.last_reader_at.lock().await;
             if has_reader {
-                *last_reader = std::time::Instant::now();
+                *last_reader = Some(std::time::Instant::now());
             }
-            let streaming = has_reader || last_reader.elapsed() < STREAMING_GRACE;
+            let streaming = has_reader
+                || last_reader.is_some_and(|at| at.elapsed() < STREAMING_GRACE);
             drop(last_reader);
             // The loop still has to come round promptly while the grace period is running, or
             // the drop back to idle would happen a whole idle interval late.
