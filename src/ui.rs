@@ -87,7 +87,7 @@ pub(crate) async fn network_view(state: &AppState, cfg: &Config) -> crate::webui
 
     // The same base as the streaming addon, with the catalogue's own manifest under it, so
     // whichever address actually works is the one offered for both.
-    let catalog_url = addon_url.replace("/manifest.json", "/catalog/manifest.json");
+    let catalog_url = addon_url.replace("/manifest.json", "/ajanlo/manifest.json");
     let catalog_state = match state.catalog.built_at().await {
         0 => "Az Ajánló még nem készült el. Induláskor épül fel, utána naponta egyszer,               a takarítás idejében."
             .to_string(),

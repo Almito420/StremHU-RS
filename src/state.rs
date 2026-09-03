@@ -543,16 +543,29 @@ impl Store {
     /// Keys only, deliberately. This runs on every range request a player makes, and cloning
     /// the whole record set for it means copying every coverage map in the library several
     /// times a second while a film is playing.
-    pub async fn keys_for_tracker_id(&self, torrent_id: &str) -> Vec<String> {
-        if torrent_id.is_empty() {
+    pub async fn keys_for_tracker_id(&self, play_id: &str) -> Vec<String> {
+        if play_id.is_empty() {
             return Vec::new();
         }
+        // The play id carries the tracker; the records hold the tracker's own number beside
+        // the tracker's name. Comparing the two directly meant a BitHUmen download was never
+        // recognised at all, because `bh:658503` is never equal to `658503`. What that cost was
+        // not obvious: the caller uses this to notice that a torrent is already open, so every
+        // seek and every rebuffer of a BitHUmen film fetched the .torrent from the tracker
+        // again before serving a byte.
+        //
+        // Matching the tracker as well as the number is the other half of it. Both sites number
+        // their torrents from one, so `12345` exists on both and is two different releases.
+        let (tracker, bare) = crate::tracker::Tracker::from_play_id(play_id);
         self.state
             .read()
             .await
             .items
             .iter()
-            .filter(|(_, item)| item.ncore_torrent_id == torrent_id)
+            .filter(|(_, item)| {
+                item.ncore_torrent_id == bare
+                    && crate::tracker::Tracker::from_id(&item.tracker) == tracker
+            })
             .map(|(key, _)| key.clone())
             .collect()
     }
@@ -1021,6 +1034,50 @@ mod tests {
         let items = store.items().await;
         let bithumen = items.iter().find(|i| i.info_hash == "bbbb").expect("there");
         assert!(bithumen.tracker_figures_at.is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A download is found by the id the play URL carries, tracker prefix and all.
+    ///
+    /// The bug this exists for: the records hold the tracker's own number, the play URL holds
+    /// `bh:` in front of it, and the two were compared directly. So a BitHUmen download was
+    /// never recognised as already open, and every seek and every rebuffer of one went back to
+    /// the tracker for a .torrent we were already holding.
+    #[tokio::test]
+    async fn a_download_is_found_by_its_play_id_on_either_tracker() {
+        let path = std::env::temp_dir().join(format!("stremhu-keys-{}.json", now()));
+        let store = Store::load(&path).expect("loads");
+
+        store
+            .upsert(Item {
+                info_hash: "aaaa".into(),
+                ncore_torrent_id: "658503".into(),
+                tracker: "bithumen".into(),
+                ..Item::default()
+            })
+            .await;
+        store
+            .upsert(Item {
+                info_hash: "bbbb".into(),
+                ncore_torrent_id: "658503".into(),
+                tracker: "ncore".into(),
+                ..Item::default()
+            })
+            .await;
+
+        let from_bithumen = store.keys_for_tracker_id("bh:658503").await;
+        assert_eq!(
+            from_bithumen,
+            vec!["aaaa:0".to_string()],
+            "the BitHUmen download was not found by its play id"
+        );
+
+        // The same number on the other tracker is a different release, and must not answer.
+        let from_ncore = store.keys_for_tracker_id("658503").await;
+        assert_eq!(from_ncore, vec!["bbbb:0".to_string()]);
+
+        assert!(store.keys_for_tracker_id("bh:999").await.is_empty());
+        assert!(store.keys_for_tracker_id("").await.is_empty());
         let _ = std::fs::remove_file(&path);
     }
 

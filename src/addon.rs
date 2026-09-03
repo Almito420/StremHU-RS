@@ -66,6 +66,16 @@ pub(crate) async fn catalog_list(
     axum::Json(stremio::CatalogResponse { metas }).into_response()
 }
 
+/// The same catalogue, when Stremio adds its paging or filter arguments as one more path
+/// segment. Nothing here pages, so the arguments are read and ignored; what matters is that
+/// the request is answered instead of refused.
+pub(crate) async fn catalog_list_extra(
+    State(state): State<Arc<AppState>>,
+    Path((api_key, kind, id, _extra)): Path<(String, String, String, String)>,
+) -> Response {
+    catalog_list(State(state), Path((api_key, kind, id))).await
+}
+
 /// Stremio requests `/stream/{type}/{id}.json`; the `.json` suffix arrives as part
 /// of the last path segment.
 pub(crate) async fn stream_list(

@@ -212,10 +212,18 @@ pub async fn serve() -> Result<()> {
     let addon = Router::new()
         .route("/{api_key}/manifest.json", get(manifest))
         .route("/{api_key}/stream/{kind}/{id}", get(stream_list))
-        // The catalogue addon: its own manifest, so adding it does not disturb the streaming
-        // one that is already installed on the televisions.
-        .route("/{api_key}/catalog/manifest.json", get(catalog_manifest))
-        .route("/{api_key}/catalog/{kind}/{id}", get(catalog_list))
+        // The catalogue addon, under a path of its own.
+        //
+        // Stremio builds a resource URL by appending `catalog/{type}/{id}.json` to the folder
+        // its manifest came from. With the manifest at `.../catalog/manifest.json` that gives
+        // `.../catalog/catalog/movie/...`, which is what the client actually asked for and
+        // what answered 404. Measured in the browser's network log, not deduced.
+        .route("/{api_key}/ajanlo/manifest.json", get(catalog_manifest))
+        .route("/{api_key}/ajanlo/catalog/{kind}/{id}", get(catalog_list))
+        // Stremio appends its paging and filter arguments as one more path segment, as in
+        // `.../catalog/movie/id/skip=100.json`. Nothing here pages, but the request has to be
+        // answered rather than refused.
+        .route("/{api_key}/ajanlo/catalog/{kind}/{id}/{extra}", get(catalog_list_extra))
         .route("/{api_key}/play/{torrent_id}", get(play_movie).head(play_movie))
         .route(
             "/{api_key}/play/{torrent_id}/{season}/{episode}",

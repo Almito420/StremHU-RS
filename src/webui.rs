@@ -1092,7 +1092,7 @@ mod tests {
     fn network_view() -> NetworkView {
         NetworkView {
             addon_url: "https://192-168-1-100.local-ip.medicmobile.org:3443/key/manifest.json".into(),
-            catalog_url: "https://192-168-1-100.local-ip.medicmobile.org:3443/key/catalog/manifest.json".into(),
+            catalog_url: "https://192-168-1-100.local-ip.medicmobile.org:3443/key/ajanlo/manifest.json".into(),
             catalog_state: "Az Ajánló még nem készült el.".into(),
             reachable_elsewhere: true,
             https_state: "HTTPS is running.".into(),
