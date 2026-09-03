@@ -32,6 +32,13 @@ pub(crate) struct AppState {
     /// Bumped on every save so the background loops know to re-read the configuration
     /// without cloning it on every pass.
     pub(crate) cfg_generation: Arc<std::sync::atomic::AtomicU64>,
+    /// How many requests have arrived, ever.
+    ///
+    /// Only the heartbeat reads it, and only to answer one question: when somebody says the
+    /// television stopped working, did its requests reach this program at all? A silent log
+    /// cannot tell "nobody asked" from "asked and got nothing", and those two have completely
+    /// different causes.
+    pub(crate) requests: std::sync::atomic::AtomicU64,
     /// The recommended catalogue, rebuilt once a day. Empty until the first build, so a
     /// viewer who never browses costs nothing.
     pub(crate) catalog: crate::catalog::Cache,
@@ -262,6 +269,36 @@ pub(crate) async fn build_catalog_if_due(state: &Arc<AppState>, trigger: &str) {
             });
         }
     }
+}
+
+/// Says out loud, every few minutes, that the program is alive and whether anybody is asking
+/// it for anything.
+///
+/// This exists because of a real evening: the television stopped being served, the same
+/// address worked from a browser on the same network, and the log for the whole period was
+/// empty. Empty because nothing was wrong that this program noticed, and an idle server writes
+/// nothing at all — so there was no way to tell whether the requests were arriving and failing
+/// or never arriving. A counted heartbeat separates those two, which is the first question and
+/// the one that decides where to look next.
+pub(crate) fn spawn_heartbeat(state: Arc<AppState>) {
+    const EVERY: std::time::Duration = std::time::Duration::from_secs(300);
+    tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        let mut previous = 0u64;
+        loop {
+            tokio::time::sleep(EVERY).await;
+            let total = state.requests.load(std::sync::atomic::Ordering::Relaxed);
+            let open = state.lib.open().await.len();
+            tracing::info!(
+                uptime_min = started.elapsed().as_secs() / 60,
+                requests_total = total,
+                requests_since = total - previous,
+                torrents = open,
+                "heartbeat"
+            );
+            previous = total;
+        }
+    });
 }
 
 /// Keeps the recommended catalogue current: once at startup, and once a day after that.

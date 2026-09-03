@@ -249,6 +249,10 @@ pub fn search_field_for(query: &str) -> &'static str {
     }
 }
 
+/// Cloneable, and cheaply: the only heavy thing in here is the HTTP client, which is an
+/// `Arc` inside and shares its connection pool and its cookie jar with every clone. That
+/// matters because a long job must not hold the lock that guards this for its whole run.
+#[derive(Clone)]
 pub struct NcoreClient {
     http: reqwest::Client,
     base: Url,

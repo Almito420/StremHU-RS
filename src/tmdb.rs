@@ -17,6 +17,9 @@ use serde::Deserialize;
 
 const BASE: &str = "https://api.themoviedb.org/3";
 
+/// Cloneable for the same reason as the tracker client: so a job that runs for half a minute
+/// can take a copy rather than hold a lock everything else needs.
+#[derive(Clone)]
 pub struct TmdbClient {
     http: reqwest::Client,
     api_key: String,

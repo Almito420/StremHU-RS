@@ -132,6 +132,7 @@ pub async fn serve() -> Result<()> {
         ncore: RwLock::new(ncore),
         bithumen: RwLock::new(bithumen),
         tmdb: RwLock::new(tmdb),
+        requests: std::sync::atomic::AtomicU64::new(0),
         catalog: crate::catalog::Cache::default(),
         searches: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         cfg: shared_cfg,
@@ -168,12 +169,31 @@ pub async fn serve() -> Result<()> {
     crate::app::spawn_problem_reporter(state.clone(), crate::alerts::channel());
     crate::app::spawn_watchdog(state.clone());
     crate::app::spawn_catalog_builder(state.clone());
+    crate::app::spawn_heartbeat(state.clone());
 
     crate::maintenance::spawn(
         Arc::new(ServerWorld {
             state: state.clone(),
         }),
         store.clone(),
+    );
+
+    // Every request that arrives, counted before anything else looks at it.
+    //
+    // Deliberately here rather than inside the handlers: a request that is refused, or that is
+    // for a path nothing answers, is exactly the one worth knowing about when somebody says a
+    // device stopped working. The counter is read by the heartbeat and nothing else.
+    let counter = state.clone();
+    let count_requests = axum::middleware::from_fn(
+        move |req: axum::extract::Request, next: axum::middleware::Next| {
+            let counter = counter.clone();
+            async move {
+                counter
+                    .requests
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                next.run(req).await
+            }
+        },
     );
 
     // Stremio runs in a browser, at web.stremio.com or inside the desktop app's own
@@ -229,7 +249,8 @@ pub async fn serve() -> Result<()> {
             "/{api_key}/play/{torrent_id}/{season}/{episode}",
             get(play_episode).head(play_episode),
         )
-        .layer(cors);
+        .layer(cors)
+        .layer(count_requests);
 
     let app = Router::new()
         .route("/", get(status))

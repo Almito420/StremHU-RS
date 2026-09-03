@@ -602,28 +602,10 @@ pub(crate) async fn wait_for(
             }
             return Ok(());
         }
-        // Only once a wait has gone on long enough to be worth explaining, and never on the
-        // thread that is also answering HTTP.
-        //
-        // Asking the engine for a torrent's state takes libtorrent's own lock, and that call is
-        // synchronous. Made straight from this loop it blocks a runtime worker for as long as
-        // the engine holds that lock, which on a busy session is not nothing, and the workers
-        // are the same ones serving the addon and the interface. On a starved stream this
-        // question was being asked several times a second.
-        //
-        // Two changes: a second must pass before it is asked at all, so a wait that resolves
-        // quickly never asks, and it is asked on a thread meant for blocking work.
-        if !logged && began.elapsed() >= std::time::Duration::from_secs(1) {
-            let handle = entry.clone();
-            let (peers, seeds, rate) = tokio::task::spawn_blocking(move || handle.swarm())
-                .await
-                .unwrap_or((-1, -1, -1));
+        if !logged {
             tracing::info!(
                 file = %entry.file_name,
                 pieces = format!("{}..{}", entry.piece_of(from), entry.piece_of(to)),
-                peers,
-                seeds,
-                rate_kbs = rate / 1024,
                 "waiting for pieces"
             );
             logged = true;

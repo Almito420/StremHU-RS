@@ -211,18 +211,6 @@ impl Entry {
         self.heads.lock().await.clone()
     }
 
-    /// Peers, seeds and the current rate for this torrent.
-    ///
-    /// Only the log asks, and only when a wait is long enough to be worth explaining. The
-    /// handle itself stays private: everything that steers the download goes through the one
-    /// loop that owns that policy.
-    pub fn swarm(&self) -> (i32, i32, i32) {
-        self.torrent
-            .stats()
-            .map(|s| (s.num_peers, s.num_seeds, s.download_rate))
-            .unwrap_or((-1, -1, -1))
-    }
-
     pub fn piece_of(&self, offset_in_file: u64) -> u32 {
         stream_policy::piece_of(self.file_offset, offset_in_file, self.piece_len)
     }

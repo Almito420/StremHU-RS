@@ -299,13 +299,24 @@ pub async fn build(
 /// anything on that page, which would be a catalogue of filenames; that is not worth
 /// publishing, so it simply does not appear.
 pub async fn refresh(state: &Arc<crate::app::AppState>) -> Result<()> {
-    let guard = state.tmdb.read().await;
-    let tmdb = guard
-        .as_ref()
-        .context("tmdb.api_key is not set, so the recommended catalogue cannot be built")?;
-    let ncore = state.ncore.read().await;
+    // Copies of the clients, and the locks let go before any of the work starts.
+    //
+    // Building the catalogue is one tracker page and about seventy TMDB lookups, which is half
+    // a minute of network time. Holding the locks that guard these clients for that long is a
+    // hazard out of proportion to what this job is worth: tokio's read-write lock is fair, so
+    // one writer arriving during the build — saving the settings is enough — makes every
+    // reader queue behind it, and the readers are the search and the playback path. A
+    // catalogue nobody asked for must not be able to stop a film that somebody did.
+    let tmdb = {
+        let guard = state.tmdb.read().await;
+        guard
+            .as_ref()
+            .context("tmdb.api_key is not set, so the recommended catalogue cannot be built")?
+            .clone()
+    };
+    let ncore = state.ncore.read().await.clone();
 
-    let (films, series) = build(&ncore, tmdb, ROWS_PER_CATALOGUE).await?;
+    let (films, series) = build(&ncore, &tmdb, ROWS_PER_CATALOGUE).await?;
     let at = crate::state::now();
     state.catalog.store(films, series, at).await;
     state.store.set_catalog_built_at(at).await;
