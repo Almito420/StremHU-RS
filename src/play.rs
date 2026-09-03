@@ -602,12 +602,22 @@ pub(crate) async fn wait_for(
             }
             return Ok(());
         }
-        if !logged {
-            // The swarm as it stands, because that is the question a slow wait raises and the
-            // one the log could not answer. "The last piece took seventeen seconds" means
-            // something quite different with three peers than with forty, and only one of the
-            // two is a thing this program can do anything about.
-            let (peers, seeds, rate) = entry.swarm();
+        // Only once a wait has gone on long enough to be worth explaining, and never on the
+        // thread that is also answering HTTP.
+        //
+        // Asking the engine for a torrent's state takes libtorrent's own lock, and that call is
+        // synchronous. Made straight from this loop it blocks a runtime worker for as long as
+        // the engine holds that lock, which on a busy session is not nothing, and the workers
+        // are the same ones serving the addon and the interface. On a starved stream this
+        // question was being asked several times a second.
+        //
+        // Two changes: a second must pass before it is asked at all, so a wait that resolves
+        // quickly never asks, and it is asked on a thread meant for blocking work.
+        if !logged && began.elapsed() >= std::time::Duration::from_secs(1) {
+            let handle = entry.clone();
+            let (peers, seeds, rate) = tokio::task::spawn_blocking(move || handle.swarm())
+                .await
+                .unwrap_or((-1, -1, -1));
             tracing::info!(
                 file = %entry.file_name,
                 pieces = format!("{}..{}", entry.piece_of(from), entry.piece_of(to)),
