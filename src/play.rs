@@ -518,7 +518,17 @@ pub(crate) async fn pump(
     let mut buf = vec![0u8; chunk as usize];
 
     while offset <= end {
-        let want = chunk.min(end - offset + 1);
+        // Small pieces of the file until the first one has gone out, then the configured size.
+        //
+        // The configured chunk is a megabyte, and on a release with half-megabyte pieces that
+        // means the very first read waits for two pieces before a single byte reaches the
+        // player. Measured on a real start: the first piece arrived after two seconds and the
+        // second after fourteen, so twelve of those seconds were spent holding a piece the
+        // player already had and could have been parsing. Asking for a quarter of a megabyte
+        // to begin with lets the header out as soon as it exists.
+        let warming = !entry.started.load(std::sync::atomic::Ordering::Relaxed);
+        let step = if warming { WARMUP_CHUNK.min(chunk) } else { chunk };
+        let want = step.min(end - offset + 1);
 
         // Report the position before waiting, so the deadline window is already
         // aimed here while the pieces are still on their way.
@@ -529,6 +539,13 @@ pub(crate) async fn pump(
         file.read_exact(slice)
             .await
             .with_context(|| format!("reading {want} bytes at {offset}"))?;
+
+        // The first chunk out is what ends the warm-up: from here the window widens to what
+        // the configuration asks for, because the job changes from "finish one piece" to
+        // "stay ahead of a reader".
+        entry
+            .started
+            .store(true, std::sync::atomic::Ordering::Relaxed);
 
         if tx.send(Ok(Bytes::copy_from_slice(slice))).await.is_err() {
             // Normal: the player seeked or stopped.
@@ -544,6 +561,13 @@ pub(crate) async fn pump(
     }
     Ok(())
 }
+
+/// How much to hand over at a time before playback has started.
+///
+/// A quarter of a megabyte. Big enough to carry a container header, small enough that it rarely
+/// spans more than one piece, which is the whole point: the first bytes should cost one piece
+/// and not two.
+const WARMUP_CHUNK: u64 = 256 * 1024;
 
 pub(crate) async fn wait_for(
     entry: &Arc<Entry>,

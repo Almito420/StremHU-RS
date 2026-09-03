@@ -179,6 +179,10 @@ pub struct Entry {
     complete: RwLock<bool>,
     /// Whether the torrent's other files have already been switched on. Once, not every tick.
     extras_promoted: AtomicBool,
+    /// Whether a byte has ever gone out to a player from this file.
+    ///
+    /// Until it has, the read-ahead window is deliberately small. See `WARMUP_READAHEAD`.
+    pub started: AtomicBool,
 }
 
 impl Entry {
@@ -791,6 +795,7 @@ impl Library {
             last_reader_at: Mutex::new(None),
             complete: RwLock::new(false),
             extras_promoted: AtomicBool::new(false),
+            started: AtomicBool::new(false),
         });
 
         // Both ends of the file, asked for before anybody has asked to read them.
@@ -861,6 +866,13 @@ fn worth_reporting(message: &str) -> Option<String> {
 /// that the first byte range of a new playback waits no longer than one pass before the
 /// deadlines start aiming at it.
 const IDLE_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// How far ahead to fetch before the first byte has reached the player.
+///
+/// Eight megabytes, against the sixty-four the configuration asks for once playback is under
+/// way. The number matters less than the shape: few enough pieces that the peers we have can
+/// finish them, rather than a hundred and change all in flight and none of them done.
+const WARMUP_READAHEAD: u64 = 8 * 1024 * 1024;
 
 /// How long a torrent keeps its streaming connection limit after the last reader goes.
 ///
@@ -1068,7 +1080,21 @@ async fn deadline_loop(lib: Arc<Library>) {
 
             // Per torrent: the window follows this torrent's piece size, so a release
             // with 16 MB pieces does not queue up hundreds of megabytes ahead.
-            let policy = cfg.pieces.to_policy(entry.piece_len);
+            let mut policy = cfg.pieces.to_policy(entry.piece_len);
+            // And narrower still until the first byte has gone out. Measured on a real start:
+            // the piece asked for on its own, before any window existed, arrived in two
+            // seconds; the next one, one of a hundred and twenty-eight the full window had just
+            // marked as wanted, took twelve. Nothing was slow except that the few peers we had
+            // were being asked for a hundred and twenty-eight things at once, so none of them
+            // finished, including the one the player was actually waiting on.
+            //
+            // The full window is right once playback is running: there the job is to stay ahead
+            // of a reader that is moving steadily. At the start the job is the opposite, to
+            // finish one piece as soon as possible, and those want different shapes.
+            if !entry.started.load(Ordering::Relaxed) {
+                policy.prefetch_pieces =
+                    stream_policy::prefetch_for_piece_size(entry.piece_len, WARMUP_READAHEAD);
+            }
             let mut active = entry.active_deadlines.lock().await;
             let plan = {
                 let have = entry.have.read().await;
