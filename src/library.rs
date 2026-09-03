@@ -732,17 +732,10 @@ impl Library {
                 // Another episode of the same pack is already being served. Only this file is
                 // added; nothing else is touched.
                 torrent.set_file_priority(selected, 7)?;
-                // And say so to the tracker at once. Everything this torrent wanted was already
-                // on disk, so it has been announcing itself as a seeder, and a seeder is handed
-                // no peers: without this the new file would sit at zero bytes until the next
-                // scheduled announce, half an hour later.
-                if let Err(e) = torrent.force_reannounce() {
-                    tracing::warn!(hash = %hash, error = %e, "could not re-announce");
-                }
                 tracing::info!(
                     hash = %hash,
                     already = siblings.len(),
-                    "another file of this torrent is now served as well, tracker told"
+                    "another file of this torrent is now served as well"
                 );
             }
         }
@@ -753,6 +746,26 @@ impl Library {
         // afterwards, once the deadline loop noticed a reader had appeared.
         torrent.set_max_connections(cfg.torrent.connections_while_streaming)?;
         torrent.resume()?;
+
+        // Tell the tracker what this torrent wants, now that it wants something.
+        //
+        // A torrent is handed to the engine with every file switched off, so that a season pack
+        // cannot start pulling episodes nobody asked for. The consequence is that its very
+        // first announce goes out while it wants nothing at all, which to a tracker is a
+        // finished seed, and a seed is handed no peers. Choosing the file afterwards changes
+        // what is wanted but announces nothing, so the download sat there until the next
+        // scheduled announce came round.
+        //
+        // Measured, and this is the whole of it: setup took 195 milliseconds, the first piece
+        // took thirty seconds, and the remaining two and a half gigabytes took eleven. Nothing
+        // was slow except finding a peer to ask.
+        //
+        // The reasoning was already written down twice in this file, for the season-pack
+        // sibling and for partial downloads. It was simply never applied to the case every
+        // ordinary playback takes.
+        if let Err(e) = torrent.force_reannounce() {
+            tracing::warn!(hash = %hash, error = %e, "could not announce the wanted set");
+        }
 
         let span = FileSpan::from_offsets(file.offset, file.size, piece_len);
         let entry = Arc::new(Entry {
