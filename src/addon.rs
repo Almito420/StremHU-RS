@@ -132,6 +132,43 @@ pub(crate) async fn stream_list(
         "search finished"
     );
 
+    // An empty list has two very different causes and they must not look the same. "Nobody has
+    // uploaded this episode" and "it is here but nothing is seeding it" lead to different
+    // actions, and the viewer sees the same blank screen for both. Measured on a real request:
+    // X-Faktor S09E02 was on the tracker, was found by the search, and was dropped because its
+    // one seeder had gone offline overnight.
+    if usable.is_empty() {
+        if let Some(se) = wanted_episode(&req) {
+            let named: Vec<&Torrent> = found
+                .iter()
+                .filter(|t| {
+                    crate::series::match_episode(t.title.as_deref().unwrap_or(""), se).is_some()
+                })
+                .collect();
+            let starved = named
+                .iter()
+                .filter(|t| t.seeders < cfg.filters.min_seeders)
+                .count();
+            if named.is_empty() {
+                tracing::info!(
+                    id = %raw_id,
+                    searched = found.len(),
+                    "nothing found for this episode: no release on either tracker names it"
+                );
+            } else {
+                tracing::warn!(
+                    id = %raw_id,
+                    matching = named.len(),
+                    below_seeder_floor = starved,
+                    min_seeders = cfg.filters.min_seeders,
+                    example = named.first().and_then(|t| t.title.as_deref()).unwrap_or(""),
+                    "the episode is on the tracker but nothing here can be offered; \
+                     lowering filters.min_seeders would show it"
+                );
+            }
+        }
+    }
+
     // Over HTTPS whenever the TLS listener is up, and this is not a nicety.
     //
     // Stremio in a browser is an HTTPS page, and a browser refuses to load plain HTTP media
