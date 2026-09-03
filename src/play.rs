@@ -589,14 +589,31 @@ pub(crate) async fn wait_for(
     // back.
     let mut interval = std::time::Duration::from_millis(25).min(poll);
 
+    let began = std::time::Instant::now();
     loop {
         if entry.ready(from, to).await {
+            if logged {
+                tracing::info!(
+                    file = %entry.file_name,
+                    pieces = format!("{}..{}", entry.piece_of(from), entry.piece_of(to)),
+                    waited_ms = began.elapsed().as_millis() as u64,
+                    "pieces arrived"
+                );
+            }
             return Ok(());
         }
         if !logged {
+            // The swarm as it stands, because that is the question a slow wait raises and the
+            // one the log could not answer. "The last piece took seventeen seconds" means
+            // something quite different with three peers than with forty, and only one of the
+            // two is a thing this program can do anything about.
+            let (peers, seeds, rate) = entry.swarm();
             tracing::info!(
                 file = %entry.file_name,
                 pieces = format!("{}..{}", entry.piece_of(from), entry.piece_of(to)),
+                peers,
+                seeds,
+                rate_kbs = rate / 1024,
                 "waiting for pieces"
             );
             logged = true;
