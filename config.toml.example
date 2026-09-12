@@ -7,101 +7,202 @@
 # Ami üresen van hagyva, azt vagy a felületen adod meg (nCore fiók, TMDB kulcs), vagy a
 # program állítja elő magának az első indításkor (api_key, session_secret, password_hash).
 # A titkokat soha ne tedd verziókövetésbe.
+#
+# Ami hiányzik a fájlból, arra az itt szereplő alapérték érvényes. A program indításkor a
+# naplóba írja, mi lett érvényben, tehát nem kell találgatni.
+
 
 [server]
+# Melyik hálózati csatolón figyeljen. A "0.0.0.0" mindegyiken, ami kell ahhoz, hogy a
+# tévé is elérje. "127.0.0.1" esetén csak ez a gép éri el.
 listen_addr = "0.0.0.0"
+# A webes felület portja. Ezen a címen állítod be a programot böngészőből.
 port = 3080
 
+
 [storage]
+# A nyilvántartás fájlja: mi van a lemezen, mennyit néztél meg belőlük, mit nem szabad
+# törölni. Ember által olvasható, meg lehet nyitni.
 state_path = "state.json"
+# Ide kerülnek a letöltött .torrent fájlok. Ezekből áll vissza minden újraindulás után,
+# anélkül hogy a trackert újra meg kellene kérdezni.
 torrent_files_dir = "torrents"
+# Hány másodpercenként írja ki a nyilvántartást. Egy lejátszás alatt másodpercenként
+# többször változik, ezért nem minden változásnál ír.
 flush_interval_secs = 15
+# Hány másodpercenként kérje el a motortól a folytatási adatokat. Ezek nélkül egy
+# újraindulás újraellenőrizné az összes letöltött fájlt, ami nagy könyvtárnál percek.
 resume_save_interval_secs = 60
 
+
 [streaming]
+# Mekkora adagokban szolgálja ki a videót a lejátszónak. Az első adag indításkor ennél
+# kisebb, hogy a fájl eleje mielőbb kimenjen.
 chunk_size_bytes = 1048576
+# Meddig vár egy darabra, mielőtt feladja. Ha ennyi idő alatt sem jön meg, a lejátszás
+# hibával áll le, nem várakozik végtelenül.
 piece_wait_timeout_secs = 120
+# Milyen sűrűn nézze meg, megjött-e a darab. A várakozás elején ennél sűrűbben néz, és
+# onnan lassul ide: egy éppen beérkezett darabot nem érdemes fél másodpercig észre nem venni.
 piece_poll_interval_ms = 400
+# Ezt a típust mondja a lejátszónak, ha a fájl kiterjesztéséből nem derül ki.
 content_type = "video/x-matroska"
 
+
 [torrent]
+# Ide kerülnek a letöltött fájlok.
 save_path = "downloads"
+# Ha az elsődleges mappa megtelt, ide ír. Üresen hagyva nincs másodlagos.
 save_path_secondary = ""
+# A torrent forgalom portja. Ezt érdemes a routeren kifelé is kinyitni, TCP-n és UDP-n
+# is: bejövő kapcsolat nélkül csak olyan peerekhez tudsz csatlakozni, akik maguk is
+# elérhetők, és egy régebbi kiadásnál ez kevés lehet.
 listen_port = 6890
+# Hány kapcsolat lehet egyszerre, összesen.
 global_connections_limit = 200
+# Hány kapcsolatot használhat egy torrent, amit épp néznek. Egy frissen megnyitott
+# torrent egyből ezt kapja, mert akkor kell neki a legtöbb peer.
 connections_while_streaming = 50
+# És amikor csak seedel. A streamelő érték még negyvenöt másodpercig érvényes az utolsó
+# néző után is, mert egy lejátszó a tekerések között rendszeresen bont és újracsatlakozik.
 connections_while_idle = 20
+# Sebességkorlát bájtban másodpercenként. 0 = korlátlan.
 download_limit_bytes = 0
 upload_limit_bytes = 0
+# Kérje-e a program magától a portnyitást a routeren. Csak akkor van értelme, ha a router
+# tud UPnP-t vagy NAT-PMP-t; ha nem, a portot kézzel kell kinyitni.
 enable_upnp_and_natpmp = false
+# Egy évadcsomagból a nézett epizód mellett a kis kísérőfájlokat is lehozza, hogy a torrent
+# teljes seeddé válhasson. Ez az ő méretkorlátjuk.
 complete_extras_below_bytes = 536870912
-# Hogyan ir a lemezre a motor.
-#   "disk"   egyenesen a fajlba, ez az alapertelmezes
-#   "memory" memoriaba vetitett fajlon keresztul, ez a libtorrent sajat alapja
-#   "auto"   a motor dontse el a tarolo alapjan
-# A "memory" gyorsabb lehet helyi SSD-n, viszont a lapokat a Windows a folyamathoz
-# szamolja: meres szerint iras kozben 1808 MB working set 71 MB privat memoria mellett.
+
+# Hogyan ír a motor a lemezre.
+#   "disk"   egyenesen a fájlba. Ez az alapértelmezés, és ez a helyes választás.
+#   "memory" memóriába vetített fájlon keresztül, ez a libtorrent saját alapja
+#   "auto"   a motor döntse el a tároló fajtája alapján
+#
+# A "memory" gyorsabb lehet helyi SSD-n, viszont a vetített lapokat a Windows ehhez a
+# folyamathoz számolja. Élő mérés ezen a projekten: egy 43,7 GB-os film letöltése közben a
+# folyamat 15 883 MB-ot tartott, amiből 119 MB volt a valódi saját memória, és a gépen 2,4 GB
+# maradt szabadon a 32-ből. Ugyanaz a fájl "disk" módban 34 MB. A különbséget nem a motor
+# okozta: a saját elszámolása szerint mindkét esetben nulla puffert fogott.
 disk_write_mode = "disk"
-# Mit csinaljon az operacios rendszer a sajat gyorsitotaraval.
-#   "normal"        hagyja bekene
-#   "write-through" minden kesz darabot azonnal kiurit
-#   "none"          gyorsitotar nelkul nyitja a fajlokat
-# A "none" a legerosebb, es a motor doksija figyelmeztet, hogy olvasasi teljesitmenyt
-# ronthat. Mi seedelunk is, tehat ezt csak vegso esetben.
+
+# Mit csináljon az operációs rendszer a saját fájlgyorsítótárával.
+#   "normal"        hagyja békén, a Windows a szabad memóriát gyorsítótárnak használja
+#   "write-through" minden kész darabot azonnal kiürít a lemezre
+#   "none"          gyorsítótár nélkül nyitja a fájlokat
+#
+# A "normal" mellett a készenléti gyorsítótár megnőhet nagy letöltésnél. Ez nem hiba:
+# visszanyerhető, és amint bárkinek kell a memória, a Windows elengedi. A "none" a
+# legerősebb, viszont a motor dokumentációja figyelmeztet, hogy olvasási teljesítményt
+# ronthat, és ez a program seedel is, tehát folyamatosan olvas.
 disk_cache_mode = "normal"
-# Hany bajtnyi kesz darab varhat a lemezszalra. 0 = a motor sajat alapertelmezese.
-# Ez valodi memoria, amit a folyamat fog.
+
+# Hány bájtnyi kész darab várhat a lemezszálra. 0 = a motor saját alapértelmezése.
+# Ez valódi memória, amit a folyamat fog, ellentétben a vetített lapokkal, tehát ha valaha a
+# motor saját pufferei nőnek meg, ez a kapcsoló.
 max_queued_disk_bytes = 0
+
+# Hány torrent lehet egyszerre aktív. -1 = korlátlan. A motor alapból három letöltésnél és
+# öt seednél többet megállít, ami azt jelentené, hogy torrentek csendben abbahagyják a
+# seedelést, és nem törlesztik a kötelezettségüket.
 max_active_torrents = -1
 
+
 [pieces]
+# Mennyit töltsön előre a lejátszási fej előtt. Az első bájt kimeneteléig ennél szűkebb
+# ablakkal dolgozik: indulásnál egy darabot kell mielőbb befejezni, nem százhuszonnyolcat
+# egyszerre elkezdeni.
 readahead_bytes = 67108864
+# A fej alatti darab határideje ezredmásodpercben. 0 = a lehető leghamarabb.
 head_deadline_ms = 0
+# A fej utáni első darab határideje, és darabonként ennyivel nő. Így a motor sorrendben
+# kéri őket, nem összevissza.
 base_deadline_ms = 2000
 deadline_step_ms = 1000
+# A fájl elejét és végét már a torrent megnyitásakor kéri. A lejátszó minden fájlnál
+# ugyanazt a két dolgot csinálja: elolvassa a fejlécet, majd a fájl végén lévő keresési
+# indexet. Nincs miért megvárni, amíg rákérdez.
 pin_file_edges = true
+# Milyen prioritást kapjanak azok a fájlok, amiket senki nem néz éppen.
 idle_priority = 4
+# Csak azt töltse le, amit ténylegesen lejátszottál. Helyet spórol, viszont a torrent soha
+# nem lesz teljes seed, és ezt nem minden tracker nézi jó szemmel.
 partial_download = false
 
+
 [maintenance]
+# A tracker saját listája szerint döntse el, mit szabad törölni. Ez erősebb minden helyi
+# időzítőnél: a tracker tudja, mivel tartozunk, a helyi óra csak azt tudja, mikor jött
+# létre a fájl.
 hit_and_run = true
+# Ennyi ideig seedel egy letöltés, mielőtt törölhető lenne. Alapból tíz nap.
 keep_seed_seconds = 864000
+# Ennyi idő után a már megnézett és leseedelt letöltés törölhető. Alapból két hét.
 cache_retention_seconds = 1209600
+# Mikor fusson a napi takarítás, helyi idő szerint.
 sweep_at = "20:00"
+# A fájl hány százalékáig kell eljutni, hogy megnézettnek számítson. 90 ott van, ahol a
+# stáblista kezdődik.
 watched_position_percent = 90
+# És a fájl hány százalékát kellett ténylegesen kiszolgálni. Ez véd meg attól, hogy egy
+# végére ugrás teljes nézésnek számítson.
 watched_min_served_percent = 50
+# Csak megnézett fájlt töröljön. Kikapcsolva a kör a még meg nem nézetteket is elviheti,
+# ha már leteltek az idők.
 require_watched = true
+# Részleges letöltésnél a helyi seedelési időt vegye alapul.
 partial_uses_local_seed_time = false
+# Egyáltalán töröljön-e. Kikapcsolva a kör csak jelent, de nem nyúl semmihez.
 enable_deletion = true
+# Ennyi szabad hely alatt szóljon. Bájtban, illetve százalékban.
 warn_below_free_bytes = 1073741824
 warn_below_free_percent = 5
+# Ide küldi az értesítéseket. Discord webhook cím működik. Üresen nincs értesítés.
 notify_webhook_url = ""
+# A tracker által közölt seedelési szabályt használja, ne a saját becslését.
 use_tracker_seed_rule = true
+# Ennyi órával tovább seedel, mint amennyi kötelező. Ez a biztonsági ráhagyás.
 seed_safety_margin_hours = 6
+# Részleges letöltésnél várja meg, hogy az arány elérje az egyet.
 partial_requires_ratio_one = false
+# Helytakarékos mód: agresszívabban töröl.
 space_saving = false
+# Fusson-e egy takarítás mindjárt induláskor.
 sweep_on_start = true
+# Ha egy letöltés nem fér el, fusson egy törlési kör előtte.
 sweep_when_full = true
+# Melyik eseményről küldjön értesítést.
 notify_sweep = true
 notify_disk = true
 notify_problems = true
 
+
 [ncore]
-username = "a nCore felhasznaloneved"
+username = "a nCore felhasználóneved"
 password = "a nCore jelszavad"
+# Töltse-e le mindig a teljes torrentet. Bekapcsolva egy évadcsomagból minden epizód lejön,
+# nem csak a nézett. Akkor kell, ha a tracker a részleges letöltést nem nézi jó szemmel.
 requires_full_download = false
 
-# Masodik tracker, csak tartaleknak. Akkor kap kerdest, ha az nCore uresen jott vissza
-# a keresett cimre, egyebkent soha. Kikapcsolva vagy fiok nelkul a program egyaltalan
-# nem szol neki, be sem lep.
+
 [bithumen]
+# A második tracker, tartaléknak. Csak akkor kap kérdést, ha az nCore nem adott lejátszható
+# választ a kért címre. Kikapcsolva a program be sem lép oda.
 enabled = false
 username = ""
 password = ""
 
+
 [filters]
+# Ennyi seedernél kevesebbet ne ajánljon fel. 0 esetén a nulla seederes kiadások is
+# megjelennek, azokról viszont lehet, hogy sosem indul el a letöltés.
 min_seeders = 1
+# Csak a legjobb találatot adja vissza, ne az összeset.
 only_best_match = false
+# Sorrendek, legkívántabb elöl. Ami nincs felsorolva, az nem tűnik el, csak a felsoroltak
+# után jön: egy preferencia nem szűrő. Szűrni egyedül a min_seeders szűr.
 resolution_order = [
     "2160p",
     "1080p",
@@ -112,36 +213,57 @@ source_order = [
     "bluray",
     "web-dl",
 ]
+# A beszélt nyelv, nem a felirat.
 language_order = [
     "hun",
     "eng",
 ]
+# Melyik számít a legtöbbet, ha a három ütközik. Alapból a nyelv: egy rossz nyelvű film
+# semmilyen felbontásban nem nézhető, egy alacsonyabb felbontás viszont csak rosszabb.
 priority = [
     "language",
     "resolution",
     "source",
 ]
-# A 3D kiadasok a lista vegere. Nem szures: valaszthato marad, csak nem az lesz,
-# amit keres nelkul megkapsz.
+# A 3D kiadások a lista végére. Nem szűrés: választható marad, csak nem az lesz, amit kérés
+# nélkül megkapsz. Egy oldalankénti képet elindítani olyan tévén, ami nincs rá beállítva,
+# nem rosszabb élmény, hanem rossz.
 three_d_last = true
 
+
 [tmdb]
-api_key = "a sajat TMDB kulcsod"
+# A TMDB kulcs a magyar címekhez és a borítókhoz kell. Nélküle a lejátszás működik, de az
+# Ajánló katalógus nem tud borítót adni.
+api_key = "a saját TMDB kulcsod"
 language = "hu-HU"
 
+
 [network]
+# Ennek a gépnek a helyi IP címe. Üresen a program maga próbálja kitalálni.
 host_ip = ""
+# HTTPS a tévéhez. A böngészőben futó Stremio HTTPS oldal, és egy böngésző nem tölt be sima
+# HTTP videót egy HTTPS oldalra: a kérés már azelőtt elakad, hogy ideérne, és amit a néző
+# lát, az egy stream, ami nem indul el.
 enable_https = true
 https_port = 3443
+# A tanúsítványt ez a szolgáltatás adja, a helyi IP címre. Nem kell hozzá domain és nem kell
+# DDNS fiók.
 cert_domain = "local-ip.medicmobile.org"
 cert_provider_url = "https://local-ip.medicmobile.org/keys"
 cert_key_url = ""
 cert_cache_dir = "certs"
+# Ennyi nappal a lejárat előtt újítja meg magától.
 cert_renew_margin_days = 21
+# Ha fordított proxy mögött fut, ide a kifelé látható domain.
 reverse_proxy_domain = ""
 
+
 [auth]
+# A webes felület belépése. A jelszót nem ide írod: a program első indításakor a felület
+# bekéri, és a titkosított alakját írja ide.
 username = "admin"
 password_hash = ""
+# A bejelentkezést aláíró titok és az addon címében szereplő kulcs. Mindkettőt a program
+# generálja első indításkor, ha üresen hagyod.
 session_secret = ""
 api_key = ""
