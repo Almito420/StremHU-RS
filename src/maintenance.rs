@@ -761,7 +761,22 @@ mod tests {
     async fn store_with(items: Vec<Item>) -> Arc<Store> {
         let dir = std::env::temp_dir().join("stremhu-rs-sweep-test");
         std::fs::create_dir_all(&dir).expect("temp dir");
-        let path = dir.join(format!("sweep-{}.json", items.len()));
+        // A name of its own for every store this helper hands out.
+        //
+        // It used to be named after the number of items, which meant two tests wanting the
+        // same number of items shared a file, and two test runs overlapping shared it across
+        // processes. On Windows that surfaces as "access denied" rather than as anything that
+        // names the real problem: a file already deleted but still open elsewhere refuses to be
+        // read until the last handle goes. Seen once during a release build, and it looked
+        // exactly like a failure in the code being tested.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = dir.join(format!(
+            "sweep-{}-{}-{}.json",
+            std::process::id(),
+            crate::state::now(),
+            unique
+        ));
         let _ = std::fs::remove_file(&path);
         let store = Store::load(&path).expect("loads");
         for item in items {
