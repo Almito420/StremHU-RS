@@ -35,6 +35,23 @@ download_limit_bytes = 0
 upload_limit_bytes = 0
 enable_upnp_and_natpmp = false
 complete_extras_below_bytes = 536870912
+# Hogyan ir a lemezre a motor.
+#   "disk"   egyenesen a fajlba, ez az alapertelmezes
+#   "memory" memoriaba vetitett fajlon keresztul, ez a libtorrent sajat alapja
+#   "auto"   a motor dontse el a tarolo alapjan
+# A "memory" gyorsabb lehet helyi SSD-n, viszont a lapokat a Windows a folyamathoz
+# szamolja: meres szerint iras kozben 1808 MB working set 71 MB privat memoria mellett.
+disk_write_mode = "disk"
+# Mit csinaljon az operacios rendszer a sajat gyorsitotaraval.
+#   "normal"        hagyja bekene
+#   "write-through" minden kesz darabot azonnal kiurit
+#   "none"          gyorsitotar nelkul nyitja a fajlokat
+# A "none" a legerosebb, es a motor doksija figyelmeztet, hogy olvasasi teljesitmenyt
+# ronthat. Mi seedelunk is, tehat ezt csak vegso esetben.
+disk_cache_mode = "normal"
+# Hany bajtnyi kesz darab varhat a lemezszalra. 0 = a motor sajat alapertelmezese.
+# Ez valodi memoria, amit a folyamat fog.
+max_queued_disk_bytes = 0
 max_active_torrents = -1
 
 [pieces]

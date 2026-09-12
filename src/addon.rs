@@ -112,7 +112,7 @@ pub(crate) async fn stream_list(
         Some(hit) => (hit, "cache"),
         None => {
             let (found, rung) =
-                run_ladder(&state, &plan, &req, &cfg.filters, kind_of(&kind, &req)).await;
+                run_ladder(&state, &plan, &req, &cfg.filters).await;
             if !found.is_empty() {
                 state.cache_search(&plan, &req, &found).await;
             }
@@ -334,14 +334,15 @@ async fn title_for_imdb(state: &AppState, series: bool, imdb: &str) -> Vec<Strin
 /// a ceiling on a title so common that walking all of it would be traffic for nothing.
 const MAX_SEARCH_PAGES: u32 = 20;
 
-/// How many pages in a row may add no new copy of the wanted episode before the walk stops.
+/// A result set of at most this many pages is read whole.
 ///
-/// A release and its re-encodes sit next to each other in any ordering a tracker offers, so
-/// once two pages running have added nothing new for this episode there is nothing more to
-/// find. Stopping at the first hit instead would take away the choice between a 720p and a
-/// 2160p copy of the same episode; walking to the ceiling every time would be twenty requests
-/// for an answer that was complete after two.
-const PAGES_WITHOUT_NEW: u32 = 2;
+/// The trackers say how many pages there are on the first page, so this is a decision and not
+/// a guess. Below the line there is nothing to weigh: three pages is three requests, and
+/// reading them all means the viewer is offered every copy of the episode rather than whichever
+/// one happened to come first. Above it, a title like "House" is sixty-seven pages and reading
+/// it whole would be pointless traffic, so there the walk stops as soon as the episode is
+/// found.
+const SMALL_RESULT_PAGES: u32 = 5;
 
 /// The episode a request is for, when it is for one.
 pub(crate) fn wanted_episode(req: &stremio::StreamRequest) -> Option<crate::series::SeasonEpisode> {
@@ -379,21 +380,11 @@ fn answers_the_request(
     !rank_candidates(found, req, filters).is_empty()
 }
 
-/// The narrowed query for an episode request: the title and its season.
+/// One search term, read across as many pages as it is worth reading.
 ///
-/// Measured on nCore: "House" returns six thousand six hundred rows across sixty-seven pages,
-/// "House S05" returns thirty-four on one. The season is as far as it can usefully go, because
-/// "House S05E12" returns nothing at all: the episode lives inside a season pack whose name
-/// never carries the episode number. So the season is the narrow end of what actually works.
-fn narrowed(term: &str, want: Option<crate::series::SeasonEpisode>) -> Option<String> {
-    let se = want?;
-    Some(format!("{term} S{:02}", se.season))
-}
-
-/// One search term walked across pages for as long as it is worth it.
-///
-/// The walk stops when the tracker runs out, when the ceiling is reached, or when the pages
-/// stop adding copies of the wanted episode.
+/// How many pages there are is known from the first one, because both trackers say so, and the
+/// rule follows from that: a short result set is read whole so nothing is missed, and a long
+/// one is abandoned as soon as the wanted episode has turned up.
 async fn walk<F, Fut>(
     label: &'static str,
     term: &str,
@@ -406,8 +397,8 @@ where
 {
     let mut out: Vec<Torrent> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut barren = 0u32;
     let mut page = 1u32;
+    let mut pages = 1u32;
 
     loop {
         let found = match fetch(term.to_string(), page).await {
@@ -418,7 +409,9 @@ where
             }
         };
         let next = found.next_page;
-        let before = exact_copies(&out, want);
+        if page == 1 {
+            pages = found.last_page.max(1);
+        }
         // A tracker that clamps an over-large page number serves one it has already given us.
         // Counting only what is new makes that look like the end of the list, which it is.
         let fresh: Vec<Torrent> = found
@@ -431,18 +424,15 @@ where
         }
         out.extend(fresh);
 
-        // Only an episode request has a reason to want another page. A film's copies are all
-        // uploaded within days of each other and sit together wherever the tracker puts them.
+        // A film's copies are all uploaded within days of each other and sit together wherever
+        // the tracker puts them, so one page is the whole answer.
         if want.is_none() {
             break;
         }
-        if exact_copies(&out, want) > before {
-            barren = 0;
-        } else {
-            barren += 1;
-            if barren >= PAGES_WITHOUT_NEW {
-                break;
-            }
+        // A long result set is abandoned the moment the episode is in hand. A short one is read
+        // to the end regardless, because the copy on the last page may be the better one.
+        if pages > SMALL_RESULT_PAGES && exact_copies(&out, want) > 0 {
+            break;
         }
         match next {
             Some(n) if page < MAX_SEARCH_PAGES => page = n,
@@ -450,7 +440,14 @@ where
         }
     }
     if page > 1 {
-        tracing::info!(tracker = label, term = %term, pages = page, hits = out.len(), "walked");
+        tracing::info!(
+            tracker = label,
+            term = %term,
+            read = page,
+            of_pages = pages,
+            hits = out.len(),
+            "walked"
+        );
     }
     out
 }
@@ -459,8 +456,7 @@ where
 /// after both of those came up short on the first.
 ///
 /// Each rung is reached only because the one before it did not answer the request, so nothing
-/// here is speculative traffic. The narrowed round in front of each title walk is the one
-/// exception: one request, and when it lands it saves the twenty behind it.
+/// here is speculative traffic.
 ///
 /// Returns which rung answered, because that is the thing worth having in the log when
 /// somebody asks why a particular episode could or could not be played.
@@ -469,18 +465,20 @@ pub(crate) async fn run_ladder(
     plan: &SearchPlan,
     req: &stremio::StreamRequest,
     filters: &crate::config::Filters,
-    series: bool,
 ) -> (Vec<Torrent>, &'static str) {
     let want = wanted_episode(req);
-    // An episode request has no business walking through films, and the other way round.
-    // Measured on nCore: "House" is six thousand six hundred rows unfiltered, four hundred and
-    // fifteen in the series categories alone. A hard narrowing, as the owner asked: a release
-    // filed in the wrong category is lost, and that is the trade that was chosen.
-    let categories: &[&str] = if series {
-        crate::ncore::SERIES_CATEGORIES
-    } else {
-        crate::ncore::FILM_CATEGORIES
-    };
+    // No category narrowing, and this is a correction rather than a preference.
+    //
+    // It was added to cut a common title from sixty-seven pages to one, with a list of category
+    // names worked out from the shape of the ones that happened to appear in a few results.
+    // That list was wrong: on this tracker a Hungarian-audio release is `hd_hun` and an
+    // original-audio one is plain `hd`, not `hd_eng`, which does not exist. So every release in
+    // its original audio was silently filtered away. Measured: "Soulm8te" returns four hits
+    // unfiltered and none at all through the narrowing.
+    //
+    // The lesson is not that the list needs fixing. It is that a filter which can only remove
+    // things, built on a guess about somebody else's naming, fails silently and looks like a
+    // search that simply found nothing.
 
     // nCore, by IMDb id. Small and exact: measured at twenty-three rows for an eight-season
     // series, so this is one request in the ordinary case.
@@ -490,7 +488,7 @@ pub(crate) async fn run_ladder(
                 .ncore
                 .read()
                 .await
-                .search_in(crate::ncore::SEARCH_BY_IMDB, &term, page, categories)
+                .search_in(crate::ncore::SEARCH_BY_IMDB, &term, page, &[])
                 .await
         })
         .await;
@@ -502,26 +500,12 @@ pub(crate) async fn run_ladder(
     // nCore, by title. Many Hungarian uploads carry no IMDb id at all, so this is not a
     // fallback for odd cases: for a Hungarian series it is usually the rung that answers.
     for term in &plan.names {
-        if let Some(narrow) = narrowed(term, want) {
-            let found = walk("ncore", &narrow, want, |term, page| async move {
-                state
-                    .ncore
-                    .read()
-                    .await
-                    .search_in(crate::ncore::SEARCH_BY_NAME, &term, page, categories)
-                    .await
-            })
-            .await;
-            if answers_the_request(&found, req, filters) {
-                return (found, "ncore/name-narrow");
-            }
-        }
         let found = walk("ncore", term, want, |term, page| async move {
             state
                 .ncore
                 .read()
                 .await
-                .search_in(crate::ncore::SEARCH_BY_NAME, &term, page, categories)
+                .search_in(crate::ncore::SEARCH_BY_NAME, &term, page, &[])
                 .await
         })
         .await;
@@ -548,15 +532,6 @@ pub(crate) async fn run_ladder(
         }
     }
     for term in &plan.names {
-        if let Some(narrow) = narrowed(term, want) {
-            let found = walk("bithumen", &narrow, want, |term, page| async move {
-                bithumen_page(state, &term, page).await
-            })
-            .await;
-            if answers_the_request(&found, req, filters) {
-                return (found, "bithumen/name-narrow");
-            }
-        }
         let found = walk("bithumen", term, want, |term, page| async move {
             bithumen_page(state, &term, page).await
         })

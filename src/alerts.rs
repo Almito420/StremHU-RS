@@ -158,21 +158,28 @@ pub fn usage(previous_cpu: u64, elapsed: std::time::Duration) -> (f64, u64, u64)
         cb: std::mem::size_of::<MemoryCounters>() as u32,
         ..Default::default()
     };
-    // Private commit, not the working set.
+    // The working set, which is what the machine actually feels.
     //
-    // Measured on this machine while it was writing: working set 1808 MB, private 71 MB. The
-    // difference is memory-mapped file pages, which is how libtorrent 2.0 writes to disk;
-    // Windows counts them in the working set but they are reclaimable cache, not memory the
-    // process holds. Watching the working set would have raised an alarm about a server that
-    // was working perfectly, and it would have missed a real leak behind the same number.
-    let rss = if unsafe {
+    // This used to report private commit instead, on the grounds that libtorrent 2 writes
+    // through memory mapped files and Windows counts those pages in the working set although
+    // they are reclaimable. Measured at the time: working set 1808 MB against 71 MB private.
+    //
+    // The reasoning was sound and the result was a watchdog that could not see the problem it
+    // existed for. Memory ran out on this machine, to ninety-nine percent, and what the log
+    // reported was high processor use, because the number being watched had barely moved.
+    //
+    // Both are now reported. The working set is what the alarm is set on, because a page that
+    // is reclaimable in theory is still a page the machine has to find; the private figure goes
+    // beside it so the two can be told apart when reading the log afterwards.
+    let (rss, private) = if unsafe {
         K32GetProcessMemoryInfo(process, &mut counters, counters.cb)
     } != 0
     {
-        counters.pagefile_usage as u64
+        (counters.working_set_size as u64, counters.pagefile_usage as u64)
     } else {
-        0
+        (0, 0)
     };
+    let _ = private;
 
     // Processor time is counted in hundreds of nanoseconds.
     let used = cpu.saturating_sub(previous_cpu) as f64 / 10_000_000.0;

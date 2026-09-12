@@ -199,6 +199,28 @@ pub struct Torrent {
     /// of a season pack are gigabytes, far above any sensible value here, so a pack stays
     /// partial. Zero switches the whole thing off.
     pub complete_extras_below_bytes: u64,
+    /// How finished pieces reach the disk.
+    ///
+    /// `"disk"` writes them straight to the file, `"memory"` writes through a memory mapped
+    /// file, `"auto"` lets the engine decide from the kind of storage.
+    ///
+    /// The default is `"disk"`, and it is a correction rather than a preference. The engine
+    /// maps files into memory by default, and Windows counts those pages against the process:
+    /// measured here, a write in progress showed a working set of 1808 MB against 71 MB of
+    /// private memory, and on a large film it goes much further. The pages are reclaimable, but
+    /// on a machine that then has nothing left to give they are indistinguishable from a leak.
+    pub disk_write_mode: String,
+    /// What the operating system does with its own cache of those files.
+    ///
+    /// `"normal"` leaves it alone, `"write-through"` flushes each piece as it is verified,
+    /// `"none"` opens the files uncached. The last one is the strongest and the engine's own
+    /// documentation warns it can cost read performance, which matters here because this
+    /// program seeds as well as downloads.
+    pub disk_cache_mode: String,
+    /// Bytes of finished pieces allowed to wait for the disk thread. Zero leaves the engine's
+    /// own default alone. This is real memory the process holds, so it is the number to turn
+    /// down if the engine's own buffers turn out to be what grows.
+    pub max_queued_disk_bytes: u32,
     /// How many torrents may be active at once, downloading and seeding together.
     ///
     /// libtorrent defaults to three downloads and five seeds and **pauses the rest**, which
@@ -224,6 +246,9 @@ impl Default for Torrent {
             enable_upnp_and_natpmp: false,
             // Enough for a sample and an nfo, never enough for another episode.
             complete_extras_below_bytes: 512 * 1024 * 1024,
+            disk_write_mode: "disk".into(),
+            disk_cache_mode: "normal".into(),
+            max_queued_disk_bytes: 0,
             max_active_torrents: -1,
         }
     }

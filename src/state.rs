@@ -918,6 +918,11 @@ impl Store {
         Some(found)
     }
 
+    /// How many play sources are being kept, for the periodic report.
+    pub async fn source_count(&self) -> usize {
+        self.state.read().await.sources.len()
+    }
+
     /// When the recommended catalogue was last built.
     ///
     /// Written down but not used to decide anything: the catalogue itself is held in memory

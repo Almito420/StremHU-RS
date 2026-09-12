@@ -11,7 +11,7 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 
 use crate::app::*;
-use crate::ui::{cookie_header, html, require_login};
+use crate::ui::{cookie_header, finish, html, pending_message, require_login};
 
 /// The by-hand watched flag.
 #[derive(serde::Deserialize)]
@@ -46,7 +46,7 @@ pub(crate) async fn ui_set_watched(
     } else {
         "Ez a letöltés nincs a nyilvántartásban.".to_string()
     };
-    downloads_page(&state, Some(message)).await
+    finish(&state, &headers, "/ui/downloads", message).await
 }
 
 /// What to call a torrent on the page.
@@ -497,7 +497,10 @@ pub(crate) async fn downloads_page(state: &AppState, message: Option<String>) ->
         };
         // Opened when something in it is about to go, so a deletion is never hidden behind a
         // closed row.
-        g.open = g.rows.iter().any(|r| r.verdict_short == "következő kör");
+        // Closed, all of them. Opening the ones with something due looked helpful and was
+        // not: on a page of a dozen downloads it meant most of the page was already unfolded,
+        // which is the same as having no summary at all.
+        g.open = false;
     }
 
     html(crate::webui::page(crate::webui::PageState::Downloads {
@@ -532,7 +535,10 @@ pub(crate) async fn ui_downloads(State(state): State<Arc<AppState>>, headers: He
     if let Some(page) = require_login(&state, cookie_header(&headers)).await {
         return page;
     }
-    downloads_page(&state, None).await
+    // Whatever the action before this one had to say. Taken here, once, rather than carried in
+    // the address.
+    let message = pending_message(&state, &headers).await;
+    downloads_page(&state, message).await
 }
 
 #[derive(serde::Deserialize)]
@@ -560,7 +566,7 @@ pub(crate) async fn ui_set_keep(
     } else {
         Some("Ez a letöltés már nincs a listán.".to_string())
     };
-    downloads_page(&state, message).await
+    finish(&state, &headers, "/ui/downloads", message.unwrap_or_default()).await
 }
 
 #[derive(serde::Deserialize)]
@@ -585,7 +591,7 @@ pub(crate) async fn ui_delete_download(
     }
 
     let Some(item) = state.store.get(&form.key).await else {
-        return downloads_page(&state, Some("Ez a letöltés már nincs meg.".into())).await;
+        return finish(&state, &headers, "/ui/downloads", "Ez a letöltés már nincs meg.").await;
     };
 
     // Whether the tracker still wants it seeded, from the last answer we have.
@@ -617,7 +623,7 @@ pub(crate) async fn ui_delete_download(
         }
         Err(e) => format!("Nem sikerült törölni: {e}"),
     };
-    downloads_page(&state, Some(message)).await
+    finish(&state, &headers, "/ui/downloads", message).await
 }
 
 /// Answers "what would tonight's run remove", without removing anything.
@@ -658,7 +664,7 @@ pub(crate) async fn ui_sweep_now(
             report.deleted.join(", ")
         )
     };
-    downloads_page(&state, Some(message)).await
+    finish(&state, &headers, "/ui/downloads", message).await
 }
 
 pub(crate) async fn ui_dry_run(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
@@ -692,7 +698,7 @@ pub(crate) async fn ui_dry_run(State(state): State<Arc<AppState>>, headers: Head
             report.deleted.join(", ")
         )
     };
-    downloads_page(&state, Some(message)).await
+    finish(&state, &headers, "/ui/downloads", message).await
 }
 
 pub(crate) async fn ui_refresh_tracker(
@@ -702,23 +708,52 @@ pub(crate) async fn ui_refresh_tracker(
     if let Some(page) = require_login(&state, cookie_header(&headers)).await {
         return page;
     }
+    // Both of the tracker's lists, and then only what is ours.
+    //
+    // The tracker answers about its whole account: a hundred and forty-eight entries at the
+    // last count, nearly all of them for downloads that are not on this disk and never were.
+    // Reporting that number said nothing about this machine. What is wanted is how many of the
+    // files here are still owed seeding, so the answer is the tracker's list crossed with our
+    // own records.
+    let ours: std::collections::HashSet<String> = state
+        .store
+        .items()
+        .await
+        .into_iter()
+        .filter(|i| !i.ncore_torrent_id.is_empty())
+        .map(|i| i.ncore_torrent_id.clone())
+        .collect();
+
     let mut message = match state.refresh_owed().await {
-        Ok(entries) => format!("Az nCore szerint {} nyitott kötelezettség van.", entries.len()),
+        Ok(entries) => {
+            let mine = entries
+                .iter()
+                .filter(|e| ours.contains(&e.torrent_id))
+                .count();
+            format!("Az nCore szerint {mine} letöltésünk vár még seedelésre.")
+        }
         Err(e) => format!("Nem sikerült beolvasni az nCore listáját: {e}"),
     };
     // And the second tracker, but only if something on the disk came from there. Asked here
     // because this is the button that says "go and look", and the page can then show the same
     // answer the sweep would act on.
     match state.refresh_owed_bithumen().await {
-        Some(Ok(count)) => {
-            message.push_str(&format!(" A BitHUmen szerint {count}."));
+        Some(Ok(_)) => {
+            let mine = state
+                .owed_bithumen
+                .read()
+                .await
+                .as_ref()
+                .map(|(_, ids)| ids.iter().filter(|id| ours.contains(*id)).count())
+                .unwrap_or(0);
+            message.push_str(&format!(" A BitHUmen szerint {mine}."));
         }
         Some(Err(e)) => {
             message.push_str(&format!(" A BitHUmen listáját nem sikerült beolvasni: {e}"));
         }
         None => {}
     }
-    downloads_page(&state, Some(message)).await
+    finish(&state, &headers, "/ui/downloads", message).await
 }
 
 #[cfg(test)]

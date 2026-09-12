@@ -256,7 +256,7 @@ pub(crate) async fn ui_save_network(
         Ok(()) => "Mentve. A HTTPS módosítás újraindítás után lép életbe.".to_string(),
         Err(e) => format!("Nem sikerült menteni: {e}"),
     };
-    settings_page(&state, Some(message)).await
+    finish(&state, &headers, "/ui", message).await
 }
 
 pub(crate) async fn ui_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
@@ -265,7 +265,10 @@ pub(crate) async fn ui_page(State(state): State<Arc<AppState>>, headers: HeaderM
         UiAccess::NeedsLogin => {
             html(crate::webui::page(crate::webui::PageState::Login { error: None }))
         }
-        UiAccess::LoggedIn => settings_page(&state, None).await,
+        UiAccess::LoggedIn => {
+            let message = pending_message(&state, &headers).await;
+            settings_page(&state, message).await
+        }
     }
 }
 
@@ -368,6 +371,32 @@ pub(crate) fn redirect(to: &str) -> Response {
     ([(header::LOCATION, to.to_string())], StatusCode::SEE_OTHER).into_response()
 }
 
+/// Finishes an action: remembers what to say, then sends the browser back to the page it came
+/// from.
+///
+/// Every action in this interface ends this way, and uniformly. Rendering the page straight
+/// from the action's own response left the address bar pointing at the action, so a refresh
+/// asked the browser to perform it a second time; putting the outcome in the address instead
+/// would leave it there to be repeated on every reload. Sending the browser back to where it
+/// already was does neither: the address is unchanged, and a refresh is just a refresh.
+pub(crate) async fn finish(
+    state: &AppState,
+    headers: &HeaderMap,
+    to: &str,
+    message: impl Into<String>,
+) -> Response {
+    let token = crate::webui::session_from_cookies(cookie_header(headers));
+    state.set_flash(&token, message).await;
+    redirect(to)
+}
+
+/// The message left by the action that came before this page, if there was one.
+pub(crate) async fn pending_message(state: &AppState, headers: &HeaderMap) -> Option<String> {
+    let token = crate::webui::session_from_cookies(cookie_header(headers));
+    state.take_flash(&token).await
+}
+
+
 #[derive(serde::Deserialize)]
 pub(crate) struct CommonForm {
     ncore_username: String,
@@ -422,7 +451,7 @@ pub(crate) async fn ui_save_common(
         Ok(()) => Some(format!("Mentve. {second}")),
         Err(e) => Some(format!("Nem sikerült menteni: {e}")),
     };
-    settings_page(&state, message).await
+    finish(&state, &headers, "/ui", message.unwrap_or_default()).await
 }
 
 /// The retention form. Checkboxes are absent from the body when unticked, which is
@@ -511,7 +540,7 @@ pub(crate) async fn ui_save_retention(
         Ok(()) => Some(summary),
         Err(e) => Some(format!("Nem sikerült menteni: {e}")),
     };
-    settings_page(&state, message).await
+    finish(&state, &headers, "/ui", message.unwrap_or_default()).await
 }
 
 /// Stops the server.
@@ -697,7 +726,7 @@ pub(crate) async fn ui_save_engine(
         Ok(()) => Some(summary),
         Err(e) => Some(format!("Nem sikerült menteni: {e}")),
     };
-    settings_page(&state, message).await
+    finish(&state, &headers, "/ui", message.unwrap_or_default()).await
 }
 
 /// Says back in words what was just saved, so the effect is visible without having to
@@ -786,7 +815,7 @@ pub(crate) async fn ui_save_toml(
         Ok(()) => Some("Saved. Listen ports need a restart to take effect.".to_string()),
         Err(e) => Some(format!("Nem sikerült menteni: {e}")),
     };
-    settings_page(&state, message).await
+    finish(&state, &headers, "/ui", message.unwrap_or_default()).await
 }
 
 /// What the server is doing right now, in words.

@@ -23,6 +23,7 @@
 #include <libtorrent/read_resume_data.hpp>
 #include <libtorrent/write_resume_data.hpp>
 #include <libtorrent/error_code.hpp>
+#include <libtorrent/session_stats.hpp>
 
 #include <map>
 
@@ -32,6 +33,8 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#include <thread>
+#include <chrono>
 
 #if defined(_WIN32)
 #define LTS_API __declspec(dllexport)
@@ -125,6 +128,23 @@ struct SessionSettings
 	int32_t download_rate_limit;
 	int32_t upload_rate_limit;
 	int32_t enable_port_mapping;
+	// How writes reach the disk. Values are libtorrent's own mmap_write_mode_t:
+	// 0 always_pwrite, 1 always_mmap_write, 2 auto_mmap_write.
+	//
+	// This one is exposed because it is the difference between a download that leaves the
+	// machine alone and one that does not. libtorrent 2 writes through memory mapped files by
+	// default, and Windows accounts those pages to the process: measured here, a write in
+	// progress showed a working set of 1808 MB against 71 MB of private memory, and on a large
+	// file it goes far further than that. Ordinary write calls give the pages straight to the
+	// filesystem instead.
+	int32_t disk_write_mode;
+	// How the operating system caches those files. libtorrent's io_buffer_mode_t:
+	// 0 enable_os_cache, 2 disable_os_cache, 3 write_through.
+	int32_t disk_io_write_mode;
+	// Bytes of finished pieces allowed to wait for the disk thread. This is real memory the
+	// process holds, unlike the mapped pages, so it is the one to turn down if the engine's own
+	// buffers turn out to be what is growing.
+	int32_t max_queued_disk_bytes;
 };
 
 // listen_port of 0 lets libtorrent choose. DHT and local discovery stay off whatever the
@@ -155,6 +175,15 @@ LTS_API Session* lts_session_new(SessionSettings const* cfg)
 		sp.set_int(lt::settings_pack::download_rate_limit, cfg->download_rate_limit);
 		sp.set_int(lt::settings_pack::upload_rate_limit, cfg->upload_rate_limit);
 		sp.set_int(lt::settings_pack::connections_limit, cfg->connections_limit);
+
+		// Where the downloaded bytes go, and who keeps them in memory on the way.
+		sp.set_int(lt::settings_pack::disk_write_mode, cfg->disk_write_mode);
+		sp.set_int(lt::settings_pack::disk_io_write_mode, cfg->disk_io_write_mode);
+		// Reads are left on the operating system's own caching. Turning that off as well is the
+		// setting libtorrent warns can cost performance, and a client that also seeds is reading
+		// constantly.
+		if (cfg->max_queued_disk_bytes > 0)
+			sp.set_int(lt::settings_pack::max_queued_disk_bytes, cfg->max_queued_disk_bytes);
 
 		// Streaming shape: never let libtorrent decide the order for us, and keep
 		// requests clustered so pieces complete near each other rather than
@@ -238,6 +267,133 @@ LTS_API int lts_session_limits(
 	catch (std::exception const& e)
 	{
 		set_error(std::string("session_limits: ") + e.what());
+		return -1;
+	}
+}
+
+// What the engine says about its own resource use.
+//
+// libtorrent runs inside this process, so the operating system's numbers for the program
+// already include it and cannot separate it out. These are the engine's own counters, which is
+// the only way to answer which part of the program is holding memory: `disk_buffer_bytes` is
+// what its disk buffers actually hold, and if that is small while the process is large, the
+// memory is in mapped pages or the system's file cache rather than in the engine.
+//
+// The counter indices are looked up by name once, from the list libtorrent publishes about
+// itself, so a version that renames or reorders them leaves a zero here rather than reading
+// the wrong number.
+struct EngineStats
+{
+	int64_t disk_buffer_bytes;
+	int64_t queued_write_bytes;
+	int64_t queued_disk_jobs;
+	int64_t blocked_disk_jobs;
+	int64_t read_jobs;
+	int64_t write_jobs;
+	int64_t writing_threads;
+	int64_t running_threads;
+	int64_t peers_connected;
+	int64_t downloading_torrents;
+	int64_t seeding_torrents;
+	int64_t checking_torrents;
+};
+
+namespace
+{
+	struct MetricIndex
+	{
+		int disk_blocks_in_use = -1;
+		int queued_write_bytes = -1;
+		int queued_disk_jobs = -1;
+		int blocked_disk_jobs = -1;
+		int num_read_jobs = -1;
+		int num_write_jobs = -1;
+		int num_writing_threads = -1;
+		int num_running_threads = -1;
+		int peers_connected = -1;
+		int downloading = -1;
+		int seeding = -1;
+		int checking = -1;
+	};
+
+	MetricIndex const& metric_index()
+	{
+		static MetricIndex const idx = []
+		{
+			MetricIndex m;
+			// By name, from libtorrent's own published list. A name it does not know comes back
+			// negative and simply stays unreported.
+			m.disk_blocks_in_use   = lt::find_metric_idx("disk.disk_blocks_in_use");
+			m.queued_write_bytes   = lt::find_metric_idx("disk.queued_write_bytes");
+			m.queued_disk_jobs     = lt::find_metric_idx("disk.queued_disk_jobs");
+			m.blocked_disk_jobs    = lt::find_metric_idx("disk.blocked_disk_jobs");
+			m.num_read_jobs        = lt::find_metric_idx("disk.num_read_jobs");
+			m.num_write_jobs       = lt::find_metric_idx("disk.num_write_jobs");
+			m.num_writing_threads  = lt::find_metric_idx("disk.num_writing_threads");
+			m.num_running_threads  = lt::find_metric_idx("disk.num_running_threads");
+			m.peers_connected      = lt::find_metric_idx("peer.num_peers_connected");
+			m.downloading          = lt::find_metric_idx("ses.num_downloading_torrents");
+			m.seeding              = lt::find_metric_idx("ses.num_seeding_torrents");
+			m.checking             = lt::find_metric_idx("ses.num_checking_torrents");
+			return m;
+		}();
+		return idx;
+	}
+
+	int64_t pick(std::vector<int64_t> const& values, int index)
+	{
+		if (index < 0 || index >= static_cast<int>(values.size())) return -1;
+		return values[static_cast<std::size_t>(index)];
+	}
+}
+
+// Asks the engine for its counters and reads the answer.
+//
+// The values arrive through the alert queue, so this posts the request and then waits briefly
+// for the reply rather than blocking on the session. A reply that does not arrive leaves the
+// caller with zeroes, which is honest: no reading is not the same as a reading of nothing.
+LTS_API int lts_engine_stats(Session* s, EngineStats* out)
+{
+	if (s == nullptr || out == nullptr) return -1;
+	try
+	{
+		*out = EngineStats{};
+		s->ses->post_session_stats();
+
+		for (int round = 0; round < 20; ++round)
+		{
+			std::vector<lt::alert*> alerts;
+			s->ses->pop_alerts(&alerts);
+			for (lt::alert* a : alerts)
+			{
+				auto* st = lt::alert_cast<lt::session_stats_alert>(a);
+				if (st == nullptr) continue;
+				auto span = st->counters();
+				std::vector<int64_t> values(span.begin(), span.end());
+				MetricIndex const& m = metric_index();
+				// Blocks are libtorrent's own 16 kiB unit; bytes are what a reader wants.
+				int64_t const blocks = pick(values, m.disk_blocks_in_use);
+				out->disk_buffer_bytes = blocks < 0 ? -1 : blocks * 16 * 1024;
+				out->queued_write_bytes = pick(values, m.queued_write_bytes);
+				out->queued_disk_jobs = pick(values, m.queued_disk_jobs);
+				out->blocked_disk_jobs = pick(values, m.blocked_disk_jobs);
+				out->read_jobs = pick(values, m.num_read_jobs);
+				out->write_jobs = pick(values, m.num_write_jobs);
+				out->writing_threads = pick(values, m.num_writing_threads);
+				out->running_threads = pick(values, m.num_running_threads);
+				out->peers_connected = pick(values, m.peers_connected);
+				out->downloading_torrents = pick(values, m.downloading);
+				out->seeding_torrents = pick(values, m.seeding);
+				out->checking_torrents = pick(values, m.checking);
+				return 0;
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(25));
+		}
+		return 1;
+	}
+	catch (std::exception const& e)
+	{
+		set_error(std::string("engine_stats: ") + e.what());
 		return -1;
 	}
 }

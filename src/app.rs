@@ -32,6 +32,17 @@ pub(crate) struct AppState {
     /// Bumped on every save so the background loops know to re-read the configuration
     /// without cloning it on every pass.
     pub(crate) cfg_generation: Arc<std::sync::atomic::AtomicU64>,
+    /// The message from the last action, waiting for the page that follows it.
+    ///
+    /// Held here rather than passed through the address bar. An action finishes by sending the
+    /// browser back to the page it came from, which leaves the address exactly as it was and
+    /// makes a refresh harmless; the sentence about what happened has to survive that trip
+    /// somehow, and the address is the one place it must not travel, because anything put
+    /// there stays there and gets repeated on every reload.
+    ///
+    /// Keyed by the session, taken by the first page that asks, and dropped. One at a time per
+    /// session is enough: nobody performs two actions before reading the answer to the first.
+    pub(crate) flash: tokio::sync::Mutex<std::collections::HashMap<String, String>>,
     /// How many requests have arrived, ever.
     ///
     /// Only the heartbeat reads it, and only to answer one question: when somebody says the
@@ -288,17 +299,76 @@ pub(crate) fn spawn_heartbeat(state: Arc<AppState>) {
         loop {
             tokio::time::sleep(EVERY).await;
             let total = state.requests.load(std::sync::atomic::Ordering::Relaxed);
-            let open = state.lib.open().await.len();
-            tracing::info!(
-                uptime_min = started.elapsed().as_secs() / 60,
-                requests_total = total,
-                requests_since = total - previous,
-                torrents = open,
-                "heartbeat"
-            );
+            report(&state, started.elapsed().as_secs() / 60, total, total - previous).await;
             previous = total;
         }
     });
+}
+
+/// One line saying where the program's memory has gone, broken down by what is holding it.
+///
+/// The engine is a library inside this process, so nothing the operating system reports can
+/// separate its memory from ours; asking it directly is the only way. That distinction is the
+/// whole point of this line. If the engine's own buffers are large, the remedy is its buffer
+/// settings. If they are small while the process is large, the memory is in mapped file pages
+/// or the system's cache, and the remedy is the write mode instead. Without the breakdown the
+/// two look identical and there is nothing to do but guess.
+pub(crate) async fn report(state: &Arc<AppState>, uptime_min: u64, total: u64, since: u64) {
+    let (_, working_set, _) = crate::alerts::usage(0, std::time::Duration::from_secs(1));
+
+    // Ours: what this program is holding on its own account.
+    let torrents = state.lib.open().await.len();
+    let searches = state.searches.lock().await.len();
+    let sources = state.store.source_count().await;
+    let catalog = state.catalog.rows(crate::catalog::Kind::Film).await.len()
+        + state.catalog.rows(crate::catalog::Kind::Series).await.len();
+
+    // The engine's: asked of it, because it cannot be measured from outside.
+    let engine = tokio::task::spawn_blocking({
+        let lib = state.lib.clone();
+        move || lib.engine_stats()
+    })
+    .await
+    .ok()
+    .flatten();
+
+    let mb = |bytes: i64| -> i64 {
+        if bytes < 0 { -1 } else { bytes / (1024 * 1024) }
+    };
+
+    match engine {
+        Some(e) => tracing::info!(
+            uptime_min,
+            requests_total = total,
+            requests_since = since,
+            process_mb = working_set / (1024 * 1024),
+            engine_buffers_mb = mb(e.disk_buffer_bytes),
+            engine_queued_write_mb = mb(e.queued_write_bytes),
+            engine_disk_jobs = e.queued_disk_jobs,
+            engine_blocked_jobs = e.blocked_disk_jobs,
+            engine_threads = e.running_threads,
+            engine_peers = e.peers_connected,
+            engine_downloading = e.downloading_torrents,
+            engine_seeding = e.seeding_torrents,
+            engine_checking = e.checking_torrents,
+            ours_torrents = torrents,
+            ours_searches = searches,
+            ours_sources = sources,
+            ours_catalog = catalog,
+            "heartbeat"
+        ),
+        None => tracing::info!(
+            uptime_min,
+            requests_total = total,
+            requests_since = since,
+            process_mb = working_set / (1024 * 1024),
+            ours_torrents = torrents,
+            ours_searches = searches,
+            ours_sources = sources,
+            ours_catalog = catalog,
+            "heartbeat (the engine did not answer)"
+        ),
+    }
 }
 
 /// Keeps the recommended catalogue current: once at startup, and once a day after that.
@@ -502,6 +572,25 @@ impl AppState {
                 size_bytes,
             )
             .await;
+    }
+
+    /// Leaves a message for the page the browser is about to be sent to.
+    pub(crate) async fn set_flash(&self, session: &str, message: impl Into<String>) {
+        if session.is_empty() {
+            return;
+        }
+        self.flash
+            .lock()
+            .await
+            .insert(session.to_string(), message.into());
+    }
+
+    /// Takes that message, once.
+    pub(crate) async fn take_flash(&self, session: &str) -> Option<String> {
+        if session.is_empty() {
+            return None;
+        }
+        self.flash.lock().await.remove(session)
     }
 
     /// The remembered result for this plan, when it is still warm.

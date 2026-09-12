@@ -266,6 +266,13 @@ pub struct SearchPage {
     pub total_results: u64,
     /// None when the current page was the last one.
     pub next_page: Option<u32>,
+    /// How many pages this result set has, when the tracker says so.
+    ///
+    /// Both trackers do say, on the first page: nCore prints the total number of hits and how
+    /// many it puts on a page, BitHUmen prints the pager itself. Knowing this up front is what
+    /// lets the walk decide whether a result set is small enough to read whole or long enough
+    /// to stop at the first hit, rather than feeling its way one page at a time.
+    pub last_page: u32,
 }
 
 impl NcoreClient {
@@ -364,6 +371,7 @@ impl NcoreClient {
                         torrents: Vec::new(),
                         total_results: 0,
                         next_page: None,
+                        last_page: 1,
                     });
                 }
                 // Surface a slice of what actually arrived; guessing at the shape
@@ -395,6 +403,7 @@ impl NcoreClient {
             } else {
                 None
             },
+            last_page: last_page.clamp(1, u32::MAX as u64) as u32,
         })
     }
 
@@ -504,14 +513,8 @@ fn search_url(
     Ok(url)
 }
 
-/// The categories a series lives in on this tracker, Hungarian and English, high definition
-/// and standard. Read off the live search results rather than copied from a list.
-pub const SERIES_CATEGORIES: &[&str] = &["hdser_hun", "hdser_eng", "xvidser_hun", "xvidser_eng"];
 
 /// And the categories a film lives in.
-pub const FILM_CATEGORIES: &[&str] = &[
-    "hd_hun", "hd_eng", "xvid_hun", "xvid_eng", "dvd_hun", "dvd_eng", "dvd9_hun", "dvd9_eng",
-];
 
 fn looks_like_no_results(body: &str) -> bool {
     body.contains("lista_mini_error") || body.contains("Nincs találat")
@@ -814,42 +817,7 @@ mod tests {
         assert_eq!(mire.as_deref(), Some("Exek csatája"));
     }
 
-    /// The category narrowing, in the shape the site's own form sends.
-    ///
-    /// Measured against the live site before it was written this way: "House" with no
-    /// narrowing is six thousand six hundred rows across sixty-seven pages, and the same
-    /// query in the series categories with its season is sixteen rows on one page. An empty
-    /// list has to stay unnarrowed, because that is what a film and an unknown kind get.
-    #[test]
-    fn a_narrowed_search_names_every_category_it_wants() {
-        let base = Url::parse(BASE_URL).expect("valid");
-        let url = search_url(&base, SEARCH_BY_NAME, "House S05", 1, SERIES_CATEGORIES)
-            .expect("builds");
-        let query = url.query().expect("has a query");
-        assert!(query.contains("tipus=kivalasztottak_kozott"));
-        for category in SERIES_CATEGORIES {
-            assert!(
-                query.contains(&format!("kivalasztott_tipus%5B%5D={category}")),
-                "{category} missing from {query}"
-            );
-        }
 
-        // Nothing asked for, nothing narrowed.
-        let wide = search_url(&base, SEARCH_BY_NAME, "House", 1, &[]).expect("builds");
-        assert!(!wide.query().expect("has a query").contains("tipus="));
-    }
-
-    /// A film and a series must not be looking in the same places, or the narrowing is
-    /// decoration.
-    #[test]
-    fn films_and_series_have_no_categories_in_common() {
-        for category in SERIES_CATEGORIES {
-            assert!(
-                !FILM_CATEGORIES.contains(category),
-                "{category} is in both lists"
-            );
-        }
-    }
 
     #[test]
     fn the_page_number_is_never_zero() {

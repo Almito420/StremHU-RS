@@ -132,6 +132,7 @@ pub async fn serve() -> Result<()> {
         ncore: RwLock::new(ncore),
         bithumen: RwLock::new(bithumen),
         tmdb: RwLock::new(tmdb),
+        flash: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         requests: std::sync::atomic::AtomicU64::new(0),
         catalog: crate::catalog::Cache::default(),
         searches: tokio::sync::Mutex::new(std::collections::HashMap::new()),

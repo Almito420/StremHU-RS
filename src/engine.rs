@@ -52,6 +52,7 @@ unsafe extern "C" {
         upload_rate: *mut i32,
     ) -> i32;
     fn lts_pump_alerts(s: *mut RawSession, err_buf: *mut c_char, err_len: i32) -> i32;
+    fn lts_engine_stats(s: *mut RawSession, out: *mut EngineStats) -> i32;
 
     fn lts_add_torrent_resume(
         s: *mut RawSession,
@@ -163,6 +164,41 @@ pub struct SessionSettings {
     pub download_rate_limit: i32,
     pub upload_rate_limit: i32,
     pub enable_port_mapping: i32,
+    /// How writes reach the disk: 0 straight to the file, 1 through a memory mapped file,
+    /// 2 whichever libtorrent thinks suits the storage.
+    pub disk_write_mode: i32,
+    /// How the operating system caches those files: 0 normally, 2 not at all, 3 written
+    /// through as each piece is finished.
+    pub disk_io_write_mode: i32,
+    /// Bytes of finished pieces that may wait for the disk thread. Zero leaves the engine's
+    /// own default alone.
+    pub max_queued_disk_bytes: i32,
+}
+
+/// What the engine reports about its own resource use.
+///
+/// It runs inside this process, so the operating system cannot separate its memory from ours.
+/// These are its own counters, and `disk_buffer_bytes` is the one that settles the question:
+/// memory the engine is actually holding, as opposed to mapped file pages or the system's
+/// cache, which look the same from outside and have different remedies.
+///
+/// A field the engine does not know comes back as -1 rather than 0, so "not reported" cannot
+/// be mistaken for "none".
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EngineStats {
+    pub disk_buffer_bytes: i64,
+    pub queued_write_bytes: i64,
+    pub queued_disk_jobs: i64,
+    pub blocked_disk_jobs: i64,
+    pub read_jobs: i64,
+    pub write_jobs: i64,
+    pub writing_threads: i64,
+    pub running_threads: i64,
+    pub peers_connected: i64,
+    pub downloading_torrents: i64,
+    pub seeding_torrents: i64,
+    pub checking_torrents: i64,
 }
 
 impl SessionSettings {
@@ -192,6 +228,9 @@ impl SessionSettings {
             // A download policy, not a session setting: applied per torrent once its
             // wanted file is on disk.
             complete_extras_below_bytes: _,
+            disk_write_mode,
+            disk_cache_mode,
+            max_queued_disk_bytes,
         } = t;
 
         Self {
@@ -201,7 +240,31 @@ impl SessionSettings {
             download_rate_limit: *download_limit_bytes,
             upload_rate_limit: *upload_limit_bytes,
             enable_port_mapping: i32::from(*enable_upnp_and_natpmp),
+            disk_write_mode: write_mode(disk_write_mode),
+            disk_io_write_mode: cache_mode(disk_cache_mode),
+            max_queued_disk_bytes: (*max_queued_disk_bytes).min(i32::MAX as u32) as i32,
         }
+    }
+}
+
+/// The engine's `mmap_write_mode_t`, from the word in the configuration.
+///
+/// An unknown word means the default rather than a refusal: a typo in one setting must not
+/// stop the server from starting, and the value it falls back to is the safe one.
+fn write_mode(name: &str) -> i32 {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "memory" | "mmap" => 1,
+        "auto" => 2,
+        _ => 0,
+    }
+}
+
+/// The engine's `io_buffer_mode_t`, likewise.
+fn cache_mode(name: &str) -> i32 {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "none" | "disable" => 2,
+        "write-through" | "through" => 3,
+        _ => 0,
     }
 }
 
@@ -240,6 +303,16 @@ impl Session {
             .to_string_lossy()
             .into_owned();
         (!msg.is_empty()).then_some(msg)
+    }
+
+    /// What the engine says about its own resource use.
+    ///
+    /// Costs a round trip through the alert queue, so this is for the periodic report and not
+    /// for anything on the path of a request.
+    pub fn stats(&self) -> Option<EngineStats> {
+        let mut out = EngineStats::default();
+        let rc = unsafe { lts_engine_stats(self.raw, &mut out) };
+        (rc == 0).then_some(out)
     }
 
     /// Adds a torrent with every file disabled, so nothing downloads until a file

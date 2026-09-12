@@ -328,6 +328,15 @@ impl Library {
         Ok(lib)
     }
 
+    /// What the torrent engine says about its own resource use.
+    ///
+    /// The engine is a library inside this process, so nothing the operating system reports can
+    /// separate its memory from the rest of the program's. This is the only way to attribute it,
+    /// and the periodic report is the only caller.
+    pub fn engine_stats(&self) -> Option<crate::engine::EngineStats> {
+        self.session.stats()
+    }
+
     /// Tells the deadline loop that something changed and it should not wait.
     pub fn wake(&self) {
         self.wake.notify_one();

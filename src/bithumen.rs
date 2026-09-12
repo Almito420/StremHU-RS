@@ -205,6 +205,7 @@ impl BithumenClient {
         Ok(crate::ncore::SearchPage {
             total_results: 0,
             next_page: (page < last_page).then_some(page + 1),
+            last_page,
             torrents,
         })
     }
