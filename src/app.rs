@@ -602,7 +602,6 @@ impl AppState {
     pub(crate) async fn cached_search(
         &self,
         plan: &SearchPlan,
-        _req: &crate::stremio::StreamRequest,
     ) -> Option<Vec<crate::tracker::Torrent>> {
         let mut map = self.searches.lock().await;
         let key = plan.cache_key();
@@ -622,13 +621,34 @@ impl AppState {
     pub(crate) async fn cache_search(
         &self,
         plan: &SearchPlan,
-        _req: &crate::stremio::StreamRequest,
         torrents: &[crate::tracker::Torrent],
     ) {
         if torrents.is_empty() {
             return;
         }
         let mut map = self.searches.lock().await;
+        // Added to what is there, not put in its place.
+        //
+        // A series is searched for one episode at a time, and different episodes can be
+        // answered by different trackers. Replacing would mean each answer threw away the one
+        // before it, so watching two episodes in a row would search twice for the same series
+        // and end up remembering only half of what it had found.
+        let key = plan.cache_key();
+        if let Some(existing) = map.get_mut(&key) {
+            let known: std::collections::HashSet<String> = existing
+                .torrents
+                .iter()
+                .map(|t| t.tracker.owed_key(&t.torrent_id))
+                .collect();
+            existing.torrents.extend(
+                torrents
+                    .iter()
+                    .filter(|t| !known.contains(&t.tracker.owed_key(&t.torrent_id)))
+                    .cloned(),
+            );
+            existing.touched = std::time::Instant::now();
+            return;
+        }
         // Oldest first, one at a time. Emptying the map would make every open series pay for a
         // fresh ladder at the same moment.
         while map.len() >= SEARCH_CACHE_LIMIT {

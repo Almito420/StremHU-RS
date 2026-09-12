@@ -108,15 +108,36 @@ pub(crate) async fn stream_list(
     // found for is asked again next time, because the reason may simply be that nobody had
     // uploaded it yet.
     let searched = std::time::Instant::now();
-    let (found, rung) = match state.cached_search(&plan, &req).await {
+    // The remembered list is used only if it answers *this* request.
+    //
+    // It is filed under the title, because that is the unit a tracker search returns and the
+    // unit an evening of watching asks for again and again. But the ladder stops at the first
+    // rung that answers, and which rung that is depends on the episode: one episode may be
+    // satisfied by the first tracker while the next exists only on the second. Handing the
+    // stored list over without checking meant the whole series was answered out of whatever
+    // happened to be found for one episode of it, and everything the other rungs would have
+    // turned up stayed invisible.
+    //
+    // Measured: X-Faktor season eleven is a complete-season pack on the second tracker, on the
+    // first page of its results, four seeders. It could not be played, because an earlier
+    // request for a different episode had filled the cache from the first tracker and every
+    // later episode was served from that.
+    let cached = state
+        .cached_search(&plan)
+        .await
+        .filter(|hits| answers_the_request(hits, &req, &cfg.filters));
+
+    let (found, rung) = match cached {
         Some(hit) => (hit, "cache"),
         None => {
-            let (found, rung) =
-                run_ladder(&state, &plan, &req, &cfg.filters).await;
-            if !found.is_empty() {
-                state.cache_search(&plan, &req, &found).await;
+            let (fresh, rung) = run_ladder(&state, &plan, &req, &cfg.filters).await;
+            if !fresh.is_empty() {
+                // Added to what is already remembered rather than replacing it. Two episodes
+                // answered by two different trackers both belong in the list, and the next
+                // episode should be able to find either without asking again.
+                state.cache_search(&plan, &fresh).await;
             }
-            (found, rung)
+            (fresh, rung)
         }
     };
     let usable = rank_candidates(&found, &req, &cfg.filters);
