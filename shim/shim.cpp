@@ -145,6 +145,15 @@ struct SessionSettings
 	// process holds, unlike the mapped pages, so it is the one to turn down if the engine's own
 	// buffers turn out to be what is growing.
 	int32_t max_queued_disk_bytes;
+	// Below how many 16 kiB blocks a file is read and written normally instead of being mapped
+	// into memory. Zero leaves libtorrent's own value alone.
+	//
+	// This is the setting that actually decides it, and `disk_write_mode` on its own does not:
+	// that one only chooses how writes travel, while the file stays mapped for reading either
+	// way, and every page touched is charged to this process. Measured on a 43.7 GB film with
+	// writes already set to go straight to disk: working set 15.9 GB against 119 MB of private
+	// memory, and the machine down to 2.4 GB free out of 32.
+	int32_t mmap_file_size_cutoff;
 };
 
 // listen_port of 0 lets libtorrent choose. DHT and local discovery stay off whatever the
@@ -178,6 +187,10 @@ LTS_API Session* lts_session_new(SessionSettings const* cfg)
 
 		// Where the downloaded bytes go, and who keeps them in memory on the way.
 		sp.set_int(lt::settings_pack::disk_write_mode, cfg->disk_write_mode);
+		// And whether they are mapped at all. A cutoff above the largest file means none of them
+		// are, which is the only way to keep a big download out of this process's working set.
+		if (cfg->mmap_file_size_cutoff > 0)
+			sp.set_int(lt::settings_pack::mmap_file_size_cutoff, cfg->mmap_file_size_cutoff);
 		sp.set_int(lt::settings_pack::disk_io_write_mode, cfg->disk_io_write_mode);
 		// Reads are left on the operating system's own caching. Turning that off as well is the
 		// setting libtorrent warns can cost performance, and a client that also seeds is reading

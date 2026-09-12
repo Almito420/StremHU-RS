@@ -302,17 +302,24 @@ impl Library {
     ) -> Result<Arc<Self>> {
         // Read once, deliberately: a bound socket cannot move, so the session's own
         // settings are fixed for the life of the process.
-        let session = {
+        let (session, asked) = {
             let snapshot = cfg.read().await;
-            Session::new(engine::SessionSettings::from_config(&snapshot.torrent))?
+            let asked = engine::SessionSettings::from_config(&snapshot.torrent);
+            (Session::new(asked)?, asked)
         };
-        // Logged from the engine's own answer rather than from what we asked for, so a
-        // setting that fails to apply is visible instead of assumed.
+        // The limits come from the engine's own answer rather than from what we asked for, so a
+        // setting that fails to apply is visible instead of assumed. The disk settings it does
+        // not report back, so those are printed as asked: they decide whether a large download
+        // stays out of this process's memory, and a run whose settings were never written down
+        // cannot be told apart afterwards from one that had different ones.
         if let Some((connections, down, up)) = session.limits() {
             tracing::info!(
                 connections,
                 download_rate = down,
                 upload_rate = up,
+                disk_write_mode = asked.disk_write_mode,
+                disk_cache_mode = asked.disk_io_write_mode,
+                never_map_below_blocks = asked.mmap_file_size_cutoff,
                 "engine settings in force"
             );
         }

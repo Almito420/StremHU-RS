@@ -173,6 +173,9 @@ pub struct SessionSettings {
     /// Bytes of finished pieces that may wait for the disk thread. Zero leaves the engine's
     /// own default alone.
     pub max_queued_disk_bytes: i32,
+    /// Below how many 16 kiB blocks a file is read and written normally rather than mapped
+    /// into memory. Zero leaves the engine's own value alone.
+    pub mmap_file_size_cutoff: i32,
 }
 
 /// What the engine reports about its own resource use.
@@ -241,11 +244,27 @@ impl SessionSettings {
             upload_rate_limit: *upload_limit_bytes,
             enable_port_mapping: i32::from(*enable_upnp_and_natpmp),
             disk_write_mode: write_mode(disk_write_mode),
+            // Writing straight to disk is taken to mean the whole of it, so the mapping is
+            // switched off as well. It has to be, because the write mode alone leaves the file
+            // mapped for reading and that is where the memory was going.
+            mmap_file_size_cutoff: if write_mode(disk_write_mode) == 0 {
+                NEVER_MAP_BELOW_BLOCKS
+            } else {
+                0
+            },
             disk_io_write_mode: cache_mode(disk_cache_mode),
             max_queued_disk_bytes: (*max_queued_disk_bytes).min(i32::MAX as u32) as i32,
         }
     }
 }
+
+/// A file size, in the engine's 16 kiB blocks, that no real download will reach.
+///
+/// A hundred and twenty-two gibibytes. The setting says files *below* the cutoff are read and
+/// written normally, so putting it above everything means nothing is ever mapped. The number is
+/// deliberately not the largest one that fits: it has to be big enough for any film and small
+/// enough to stay obviously sane if it ever turns up in a log.
+const NEVER_MAP_BELOW_BLOCKS: i32 = 8_000_000;
 
 /// The engine's `mmap_write_mode_t`, from the word in the configuration.
 ///

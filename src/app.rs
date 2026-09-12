@@ -975,16 +975,26 @@ pub(crate) fn spawn_problem_reporter(
 /// The failures that matter most are the ones that log nothing: a loop that will not end, a
 /// wedged download, memory that only grows. Nothing reports those, so they are measured.
 pub(crate) fn spawn_watchdog(state: Arc<AppState>) {
-    // Every half minute, and a problem has to hold for ten of those before it is mentioned.
+    // Every half minute, and a processor problem has to hold for ten of those before it is
+    // mentioned, because a busy half minute is not news.
     const INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
     const NEEDED: usize = 10;
-    // Two thirds of one core, and one gigabyte of privately held memory. Measured on this
-    // machine: idle is a fraction of a percent and under thirty megabytes, and downloading four
-    // episodes at once while writing twenty-four gigabytes came to seventy-one megabytes. A
-    // gigabyte is therefore more than an order of magnitude clear of normal working, which is
-    // where a threshold for "something is wrong" belongs.
+    // Memory is not treated the same way, and that is the point.
+    //
+    // Five minutes of agreement is right for processor use, where a spike means nothing. It is
+    // wrong for memory: measured here, this program went from seventy-seven megabytes to almost
+    // sixteen gigabytes in under three minutes, and the machine was down to two gigabytes free
+    // before the watchdog had collected enough samples to be allowed to speak. The owner had to
+    // notice it himself and stop the program. Two readings a minute apart is enough agreement
+    // for a number that only ever climbs.
+    const MEMORY_NEEDED: usize = 2;
+    // Two thirds of one core, and two gigabytes held. Measured on this machine: idle is a
+    // fraction of a percent and well under a hundred megabytes, and a download in progress with
+    // the files no longer mapped into memory stays in the same range. Two gigabytes is
+    // therefore far clear of normal working, which is where a threshold for "something is
+    // wrong" belongs.
     const CPU_LIMIT: f64 = 0.66;
-    const RSS_LIMIT: u64 = 1024 * 1024 * 1024;
+    const RSS_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
 
     tokio::spawn(async move {
         let mut samples: Vec<(f64, u64)> = Vec::new();
@@ -1001,8 +1011,38 @@ pub(crate) fn spawn_watchdog(state: Arc<AppState>) {
                 samples.remove(0);
             }
 
+            // Memory first and on its own terms. A short agreement is deliberate: by the time
+            // a long one is satisfied the machine may have nothing left to give.
+            let memory_problem = samples.len() >= MEMORY_NEEDED
+                && samples
+                    .iter()
+                    .rev()
+                    .take(MEMORY_NEEDED)
+                    .all(|(_, held)| *held > RSS_LIMIT);
+            if memory_problem {
+                // What the program itself is holding, and what the engine says of its own
+                // share, because the two lead to different remedies and the message is worth
+                // nothing without the distinction.
+                let engine = state
+                    .lib
+                    .engine_stats()
+                    .map(|e| e.disk_buffer_bytes / (1024 * 1024))
+                    .unwrap_or(-1);
+                let text = format!(
+                    "A program {} MB memóriát tart, ebből a torrentmotor saját puffere {} MB.",
+                    rss / (1024 * 1024),
+                    engine
+                );
+                tracing::warn!("{text}");
+                if state.config().await.maintenance.notify_problems {
+                    state.notify_occasionally("watchdog-memory", &text).await;
+                }
+                samples.clear();
+                continue;
+            }
+
             if let Some(text) =
-                crate::alerts::sustained_problem(&samples, CPU_LIMIT, RSS_LIMIT, NEEDED)
+                crate::alerts::sustained_problem(&samples, CPU_LIMIT, u64::MAX, NEEDED)
             {
                 tracing::warn!("{text}");
                 if state.config().await.maintenance.notify_problems {
