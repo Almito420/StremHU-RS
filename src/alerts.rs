@@ -260,6 +260,17 @@ pub fn usage(previous_cpu: u64, _elapsed: std::time::Duration) -> (f64, u64, u64
 /// finished download and takes a gigabyte of mapped pages while it writes at seventeen megabytes
 /// a second; both are the program working, not failing. What is worth a message is the same
 /// reading over and over with nothing to show for it.
+/// How many threads this machine can actually run at once.
+///
+/// Everything about processor use is a fraction of this, because a number of cores means
+/// nothing on its own: one and a half cores is most of a small machine and a rounding error on
+/// a large one. Falls back to one, which makes the fraction pessimistic rather than blind.
+pub fn cores() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+}
+
 pub fn sustained_problem(
     samples: &[(f64, u64)],
     cpu_limit: f64,
@@ -272,11 +283,21 @@ pub fn sustained_problem(
     let recent = &samples[samples.len() - needed..];
     if recent.iter().all(|(cpu, _)| *cpu >= cpu_limit) {
         let worst = recent.iter().map(|(cpu, _)| *cpu).fold(0.0, f64::max);
+        // Said as a share of this machine, not as a share of one core.
+        //
+        // The old wording reported 1.6 cores as "160%", which on a sixteen-thread processor is
+        // four percent of what there is, and it read like an emergency. Whoever sees this
+        // message needs to know how much of the machine is gone, and that depends on the
+        // machine.
+        let cores = cores() as f64;
         return Some(format!(
-            "A processzorhasználat {} mérésen át {:.0}% fölött volt, csúcson {:.0}%.",
+            "A processzorhasználat {} mérésen át a gép {:.0}%-a fölött volt, csúcson {:.0}% \
+             ({:.1} mag a {:.0}-ból).",
             needed,
-            cpu_limit * 100.0,
-            worst * 100.0
+            cpu_limit / cores * 100.0,
+            worst / cores * 100.0,
+            worst,
+            cores
         ));
     }
     if recent.iter().all(|(_, rss)| *rss >= rss_limit_bytes) {
@@ -365,11 +386,22 @@ RssAnon:	   72704 kB
         let spiky = vec![(0.05, 30 * 1024 * 1024), (0.99, 40 * 1024 * 1024), (0.02, 30 * 1024 * 1024)];
         assert!(sustained_problem(&spiky, 0.6, 2 * GIB, 3).is_none());
 
-        // Pegged throughout: worth saying.
+        // Pegged throughout: worth saying, and said in terms of this machine.
+        //
+        // The reading is in cores, so the message has to divide by how many there are. The
+        // count is whatever the machine running the test has, which is why the assertion is on
+        // the shape of the sentence and on the reading itself rather than on a percentage: a
+        // number of cores means nothing until it is compared with what is available, and that
+        // is exactly what this used to get wrong. It reported 1.6 cores as "160%" and had
+        // people reading an emergency into four percent of a sixteen-thread processor.
         let pegged = vec![(0.8, 30 * 1024 * 1024); 3];
         let said = sustained_problem(&pegged, 0.6, 2 * GIB, 3).expect("reported");
         assert!(said.contains("processzor"), "{said}");
-        assert!(said.contains("80%"), "the worst reading is in it: {said}");
+        assert!(said.contains("0.8 mag"), "the worst reading is in it: {said}");
+        assert!(
+            said.contains(&format!("{}-ból", cores())),
+            "it has to say what it is a share of: {said}"
+        );
 
         // Memory the same way.
         let fat = vec![(0.01, 3 * GIB); 3];

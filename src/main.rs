@@ -89,6 +89,14 @@ fn log_file_path() -> std::path::PathBuf {
 
 static LOG_FILE: std::sync::OnceLock<std::sync::Mutex<std::fs::File>> = std::sync::OnceLock::new();
 
+/// Whether the program was started with logging switched on.
+static LOGGING_ASKED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Whether anything exists to read a measurement, which is the only reason to take one.
+pub fn logging_enabled() -> bool {
+    *LOGGING_ASKED.get().unwrap_or(&false)
+}
+
 /// Writes each log line to the file, one writer at a time.
 ///
 /// The lock is taken per line rather than held, and a poisoned lock is used anyway: a panic
@@ -236,6 +244,16 @@ fn init_logging(args: &[String]) {
     // Whether anybody asked for logging at all. Without this there is no file and no output:
     // "off" is the answer to a question that was not asked.
     let asked = level.is_some() || from_env.is_some();
+    // And remembered, because it decides more than where the words go.
+    //
+    // Everything that exists only to be read in a log is switched off with the log itself: the
+    // periodic report, the counters it asks the engine for, the tally of requests. A server
+    // running unattended has nobody to read any of it, and measuring for an audience that is
+    // not there is work for nothing.
+    //
+    // The exception is the watchdog, which keeps measuring whatever the switches say, because
+    // its job is not to describe the program but to notice when it is in trouble and send word.
+    let _ = LOGGING_ASKED.set(asked);
     // Errors are never filtered out, whatever was asked for.
     //
     // Not for the log: with no switch there is still no file and no output, because there is no

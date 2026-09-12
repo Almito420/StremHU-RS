@@ -168,9 +168,16 @@ pub async fn serve() -> Result<()> {
     // Problems reported from anywhere in the program, and the ones that report themselves only
     // by how the machine feels.
     crate::app::spawn_problem_reporter(state.clone(), crate::alerts::channel());
+    // The watchdog runs whatever the switches say: it is the one that has to notice trouble
+    // and send word, and that is not a thing to switch off with the logging.
     crate::app::spawn_watchdog(state.clone());
     crate::app::spawn_catalog_builder(state.clone());
-    crate::app::spawn_heartbeat(state.clone());
+    // The periodic report is the opposite: it exists to be read. Without a log there is nobody
+    // to read it, so it is not taken at all, and neither is the round trip to the engine that
+    // it costs.
+    if crate::logging_enabled() {
+        crate::app::spawn_heartbeat(state.clone());
+    }
 
     crate::maintenance::spawn(
         Arc::new(ServerWorld {
@@ -250,8 +257,7 @@ pub async fn serve() -> Result<()> {
             "/{api_key}/play/{torrent_id}/{season}/{episode}",
             get(play_episode).head(play_episode),
         )
-        .layer(cors)
-        .layer(count_requests);
+        .layer(cors);
 
     let app = Router::new()
         .route("/", get(status))
@@ -278,6 +284,16 @@ pub async fn serve() -> Result<()> {
         .route("/ui/save-network", post(ui_save_network))
         .merge(addon)
         .with_state(state.clone());
+
+    // Counting every request that arrives, but only when something will read the count.
+    //
+    // It is one atomic addition, so the cost is not the point: the point is that a server
+    // running unattended is not asked to keep books nobody opens.
+    let app = if crate::logging_enabled() {
+        app.layer(count_requests)
+    } else {
+        app
+    };
 
     // Kept so the HTTPS hostname can be recorded once the TLS listener is up; the
     // router has consumed the state by then.

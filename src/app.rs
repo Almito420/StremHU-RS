@@ -988,13 +988,21 @@ pub(crate) fn spawn_watchdog(state: Arc<AppState>) {
     // notice it himself and stop the program. Two readings a minute apart is enough agreement
     // for a number that only ever climbs.
     const MEMORY_NEEDED: usize = 2;
-    // Two thirds of one core, and two gigabytes held. Measured on this machine: idle is a
-    // fraction of a percent and well under a hundred megabytes, and a download in progress with
-    // the files no longer mapped into memory stays in the same range. Two gigabytes is
-    // therefore far clear of normal working, which is where a threshold for "something is
-    // wrong" belongs.
-    const CPU_LIMIT: f64 = 0.66;
+    // Half the machine, and two gigabytes held.
+    //
+    // The processor limit used to be two thirds of one core, and that is what kept raising the
+    // alarm: on this machine, sixteen threads, verifying a forty-gigabyte download reached 1.6
+    // cores, which is four percent of what there is and exactly what the processor is for. A
+    // limit has to know what it is running on, so it is taken as a share of everything
+    // available. Half of it, sustained for five minutes, is a real problem on any machine;
+    // one and a half cores is not.
+    //
+    // Two gigabytes for memory. Measured with the files no longer mapped into memory: idle is
+    // under forty megabytes and a download in progress stays in the same range, so this is far
+    // clear of normal working, which is where such a threshold belongs.
+    const CPU_SHARE_OF_MACHINE: f64 = 0.5;
     const RSS_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
+    let cpu_limit = crate::alerts::cores() as f64 * CPU_SHARE_OF_MACHINE;
 
     tokio::spawn(async move {
         let mut samples: Vec<(f64, u64)> = Vec::new();
@@ -1042,7 +1050,7 @@ pub(crate) fn spawn_watchdog(state: Arc<AppState>) {
             }
 
             if let Some(text) =
-                crate::alerts::sustained_problem(&samples, CPU_LIMIT, u64::MAX, NEEDED)
+                crate::alerts::sustained_problem(&samples, cpu_limit, u64::MAX, NEEDED)
             {
                 tracing::warn!("{text}");
                 if state.config().await.maintenance.notify_problems {
