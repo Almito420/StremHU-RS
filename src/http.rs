@@ -264,24 +264,34 @@ pub async fn serve() -> Result<()> {
         // Reachable by name as well: "/status" is what the interface links to and what
         // anyone would type.
         .route("/status", get(status))
+        // Everything that needs somebody logged in, behind one gate.
+        //
+        // The check used to be a line at the top of each handler, in two different spellings.
+        // Here it is the router's business, which means a handler added later is protected by
+        // where it is registered rather than by whoever remembers to write the line.
+        .merge(
+            Router::new()
+                .route("/ui/shutdown", post(ui_shutdown))
+                .route("/ui/save-common", post(ui_save_common))
+                .route("/ui/save-retention", post(ui_save_retention))
+                .route("/ui/save-engine", post(ui_save_engine))
+                .route("/ui/test-notification", post(ui_test_notification))
+                .route("/ui/save-toml", post(ui_save_toml))
+                .route("/ui/save-network", post(ui_save_network))
+                .route("/ui/downloads", get(ui_downloads))
+                .route("/ui/downloads/keep", post(ui_set_keep))
+                .route("/ui/downloads/watched", post(ui_set_watched))
+                .route("/ui/downloads/delete", post(ui_delete_download))
+                .route("/ui/downloads/refresh-tracker", post(ui_refresh_tracker))
+                .route("/ui/downloads/dry-run", post(ui_dry_run))
+                .route("/ui/downloads/sweep-now", post(ui_sweep_now))
+                .route_layer(axum::middleware::from_fn_with_state(state.clone(), gate)),
+        )
+        // And the three that have to work while logged out.
         .route("/ui", get(ui_page))
         .route("/ui/setup", post(ui_setup))
         .route("/ui/login", post(ui_login))
         .route("/ui/logout", post(ui_logout))
-        .route("/ui/shutdown", post(ui_shutdown))
-        .route("/ui/save-common", post(ui_save_common))
-        .route("/ui/save-retention", post(ui_save_retention))
-        .route("/ui/save-engine", post(ui_save_engine))
-        .route("/ui/test-notification", post(ui_test_notification))
-        .route("/ui/save-toml", post(ui_save_toml))
-        .route("/ui/downloads", get(ui_downloads))
-        .route("/ui/downloads/keep", post(ui_set_keep))
-        .route("/ui/downloads/watched", post(ui_set_watched))
-        .route("/ui/downloads/delete", post(ui_delete_download))
-        .route("/ui/downloads/refresh-tracker", post(ui_refresh_tracker))
-        .route("/ui/downloads/dry-run", post(ui_dry_run))
-        .route("/ui/downloads/sweep-now", post(ui_sweep_now))
-        .route("/ui/save-network", post(ui_save_network))
         .merge(addon)
         .with_state(state.clone());
 

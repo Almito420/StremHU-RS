@@ -437,6 +437,15 @@ fn render_rows(rows: &[DownloadRow]) -> String {
     out
 }
 
+/// Which page is being rendered, and everything it needs.
+///
+/// The settings variant is much larger than the others, and clippy would rather it were boxed.
+/// It is not, deliberately. This value is built immediately before it is handed to the
+/// renderer and dropped immediately after; it is never stored, never collected, never sent
+/// anywhere. Boxing it would trade one copy of a few hundred bytes for one heap allocation and
+/// release per page view, which is not an improvement, only a different cost. The lint is
+/// right about enums that get kept; this one does not.
+#[allow(clippy::large_enum_variant)]
 pub enum PageState {
     /// No admin password yet.
     Setup,
@@ -558,7 +567,7 @@ pub fn human_ago(secs: u64) -> String {
     if secs < 90 {
         return "épp most".into();
     }
-    format!("{}", human_duration(secs))
+    human_duration(secs).to_string()
 }
 
 /// The retention settings as the form shows them.

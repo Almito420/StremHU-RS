@@ -124,11 +124,10 @@ fn cell_text(block: &str, class: &str) -> Option<String> {
 pub(crate) fn attribute(block: &str, name: &str) -> Option<String> {
     for quote in ['"', '\''] {
         let marker = format!("{name}={quote}");
-        if let Some(rest) = block.split_once(marker.as_str()) {
-            if let Some(value) = rest.1.split(quote).next() {
+        if let Some(rest) = block.split_once(marker.as_str())
+            && let Some(value) = rest.1.split(quote).next() {
                 return Some(value.to_string());
             }
-        }
     }
     None
 }
@@ -512,9 +511,6 @@ fn search_url(
     }
     Ok(url)
 }
-
-
-/// And the categories a film lives in.
 
 fn looks_like_no_results(body: &str) -> bool {
     body.contains("lista_mini_error") || body.contains("Nincs találat")

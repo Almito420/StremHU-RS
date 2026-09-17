@@ -5,6 +5,9 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.104"
+# Already in the tree under axum; named here because the streaming path builds its buffers
+# directly, to hand the bytes to the response without copying them a second time.
+bytes = "1"
 argon2 = "0.5.3"
 axum = "0.8.9"
 axum-server = { version = "0.8.0", features = ["tls-rustls"] }

@@ -542,16 +542,14 @@ impl Attributes {
         // which pattern happens to sit earlier in the table.
         tags.retain(|(_, label)| !beaten.contains(label));
 
-        if !tags.iter().any(|(g, _)| *g == Group::Resolution) {
-            if let Some(label) = resolution_from_category(category) {
+        if !tags.iter().any(|(g, _)| *g == Group::Resolution)
+            && let Some(label) = resolution_from_category(category) {
                 tags.push((Group::Resolution, label));
             }
-        }
-        if !tags.iter().any(|(g, _)| *g == Group::Language) {
-            if let Some(label) = language_from_category(category) {
+        if !tags.iter().any(|(g, _)| *g == Group::Language)
+            && let Some(label) = language_from_category(category) {
                 tags.push((Group::Language, label));
             }
-        }
 
         Self { tags }
     }

@@ -11,7 +11,7 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 
 use crate::app::*;
-use crate::ui::{cookie_header, finish, html, pending_message, require_login};
+use crate::ui::{finish, html, pending_message};
 
 /// The by-hand watched flag.
 #[derive(serde::Deserialize)]
@@ -30,9 +30,6 @@ pub(crate) async fn ui_set_watched(
     headers: HeaderMap,
     Form(form): Form<WatchedForm>,
 ) -> Response {
-    if let Some(page) = require_login(&state, cookie_header(&headers)).await {
-        return page;
-    }
     let watched = form.watched == "1";
     let message = if state.store.set_watched(&form.key, watched).await {
         let _ = state.store.flush().await;
@@ -117,7 +114,7 @@ fn answer_for(
         crate::tracker::Tracker::Bithumen => match bithumen {
             Some((_, ids)) => Answer {
                 asked: true,
-                owes: ids.iter().any(|id| *id == item.ncore_torrent_id),
+                owes: ids.contains(&item.ncore_torrent_id),
                 // From the record, which was written by the same read: the list gives the
                 // remaining time per torrent and nothing else.
                 remaining: item.owed_remaining_secs,
@@ -532,9 +529,6 @@ pub(crate) fn short_reason(why: &str) -> String {
 }
 
 pub(crate) async fn ui_downloads(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    if let Some(page) = require_login(&state, cookie_header(&headers)).await {
-        return page;
-    }
     // Whatever the action before this one had to say. Taken here, once, rather than carried in
     // the address.
     let message = pending_message(&state, &headers).await;
@@ -552,9 +546,6 @@ pub(crate) async fn ui_set_keep(
     headers: HeaderMap,
     Form(form): Form<KeepForm>,
 ) -> Response {
-    if let Some(page) = require_login(&state, cookie_header(&headers)).await {
-        return page;
-    }
     let keep = form.keep == "1";
     let message = if state.store.set_keep(&form.key, keep).await {
         let _ = state.store.flush().await;
@@ -586,10 +577,6 @@ pub(crate) async fn ui_delete_download(
     headers: HeaderMap,
     Form(form): Form<DeleteForm>,
 ) -> Response {
-    if let Some(page) = require_login(&state, cookie_header(&headers)).await {
-        return page;
-    }
-
     let Some(item) = state.store.get(&form.key).await else {
         return finish(&state, &headers, "/ui/downloads", "Ez a letöltés már nincs meg.").await;
     };
@@ -640,9 +627,6 @@ pub(crate) async fn ui_sweep_now(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Some(page) = require_login(&state, cookie_header(&headers)).await {
-        return page;
-    }
     let world = ServerWorld {
         state: state.clone(),
     };
@@ -668,9 +652,6 @@ pub(crate) async fn ui_sweep_now(
 }
 
 pub(crate) async fn ui_dry_run(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    if let Some(page) = require_login(&state, cookie_header(&headers)).await {
-        return page;
-    }
     let cfg = state.config().await;
     let world = ServerWorld {
         state: state.clone(),
@@ -705,9 +686,6 @@ pub(crate) async fn ui_refresh_tracker(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Some(page) = require_login(&state, cookie_header(&headers)).await {
-        return page;
-    }
     // Both of the tracker's lists, and then only what is ours.
     //
     // The tracker answers about its whole account: a hundred and forty-eight entries at the

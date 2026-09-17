@@ -655,11 +655,29 @@ impl Store {
 
     /// Bytes were delivered from `offset`. This is the only signal there is about how
     /// far a viewer got.
-    pub async fn record_served(&self, key: &str, offset: u64, len: u64, at: Unix) {
+    /// Records stretches of the file that have actually reached the player.
+    ///
+    /// This takes the write lock that guards the whole store, to touch a few fields of one
+    /// record. Called once per chunk that goes out, which at sixty megabytes a second is sixty
+    /// times a second per stream, and every one of them holds off the settings page, the
+    /// deletion round and the flusher for as long as it takes. The work inside is tiny and it
+    /// was almost certainly never noticed; it is the shape that is wrong, and two streams at
+    /// once is where a shape like that starts to show.
+    ///
+    /// The caller gathers the stretches and hands them over together, so the same information
+    /// arrives under one lock instead of sixty. Nothing is approximated: every stretch is still
+    /// recorded exactly where it was served, because "how much of this was actually watched" is
+    /// what decides later whether it may be deleted.
+    pub async fn record_served_many(&self, key: &str, served: &[(u64, u64)], at: Unix) {
+        if served.is_empty() {
+            return;
+        }
         let mut state = self.state.write().await;
         if let Some(item) = state.items.get_mut(key) {
-            item.mark_served(offset, len);
-            item.furthest_byte = item.furthest_byte.max(offset.saturating_add(len));
+            for (offset, len) in served {
+                item.mark_served(*offset, *len);
+                item.furthest_byte = item.furthest_byte.max(offset.saturating_add(*len));
+            }
             item.last_played_at = Some(at);
         }
         drop(state);
@@ -1274,7 +1292,7 @@ mod tests {
 
         // Watched separately: what happens to one must not show up on the other.
         store.record_play("packhash:3", 1_000_000).await;
-        store.record_served("packhash:3", 0, 900_000, 1_000_000).await;
+        store.record_served_many("packhash:3", &[(0, 900_000)], 1_000_000).await;
         let fourth = store.get("packhash:3").await.expect("there");
         let sixth = store.get("packhash:5").await.expect("there");
         assert_eq!(fourth.play_count, 1);
@@ -1539,7 +1557,7 @@ mod tests {
             })
             .await;
         store.record_play("hash1:0", 200).await;
-        store.record_served("hash1:0", 0, 950, 210).await;
+        store.record_served_many("hash1:0", &[(0, 950)], 210).await;
         store.flush().await.expect("writes");
 
         let back = Store::load(&path).expect("reloads");
@@ -1634,8 +1652,8 @@ mod tests {
                 ..Item::default()
             })
             .await;
-        store.record_served("h:0", 8_000, 500, 1).await;
-        store.record_served("h:0", 100, 500, 2).await; // viewer seeks back
+        store.record_served_many("h:0", &[(8_000, 500)], 1).await;
+        store.record_served_many("h:0", &[(100, 500)], 2).await; // viewer seeks back
         let item = store.get("h:0").await.expect("there");
         assert_eq!(item.furthest_byte, 8_500);
         let _ = std::fs::remove_file(&path);

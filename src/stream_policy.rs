@@ -410,9 +410,7 @@ mod tests {
     #[test]
     fn pieces_already_held_are_skipped() {
         let mut have = vec![0u8; 100];
-        for i in 10..20 {
-            have[i] = 1;
-        }
+        have[10..20].fill(1);
         let heads = [ReadHead {
             span: span(0, 99),
             piece: 10,

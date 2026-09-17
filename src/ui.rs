@@ -62,7 +62,7 @@ pub(crate) async fn settings_page(state: &AppState, message: Option<String>) -> 
 
 /// The addon URL and what to say about reaching it.
 pub(crate) async fn network_view(state: &AppState, cfg: &Config) -> crate::webui::NetworkView {
-    let https_live = *state.https_host.read().await != None;
+    let https_live = (*state.https_host.read().await).is_some();
     let host = cfg.network.https_host();
 
     // The URL offered is the one that will actually work. Showing the HTTPS address
@@ -229,10 +229,6 @@ pub(crate) async fn ui_save_network(
     headers: HeaderMap,
     Form(form): Form<NetworkForm>,
 ) -> Response {
-    if let Some(page) = require_login(&state, cookie_header(&headers)).await {
-        return page;
-    }
-
     let mut cfg = state.config().await;
     let trimmed = form.host_ip.trim();
     // Refused rather than accepted and left broken: a malformed address means no
@@ -245,11 +241,10 @@ pub(crate) async fn ui_save_network(
         .await;
     }
     cfg.network.host_ip = trimmed.to_string();
-    if let Ok(port) = form.https_port.trim().parse::<u16>() {
-        if port > 0 {
+    if let Ok(port) = form.https_port.trim().parse::<u16>()
+        && port > 0 {
             cfg.network.https_port = port;
         }
-    }
     cfg.network.enable_https = form.enable_https.is_some();
 
     let message = match state.apply_config(cfg).await {
@@ -416,13 +411,6 @@ pub(crate) async fn ui_save_common(
     headers: HeaderMap,
     Form(form): Form<CommonForm>,
 ) -> Response {
-    if !matches!(
-        ui_state(&state, cookie_header(&headers)).await,
-        UiAccess::LoggedIn
-    ) {
-        return redirect("/ui");
-    }
-
     let mut cfg = state.config().await;
     // A blank field means unchanged, so a password never has to be retyped just to
     // edit something else on the same form.
@@ -495,13 +483,6 @@ pub(crate) async fn ui_save_retention(
     headers: HeaderMap,
     Form(form): Form<RetentionForm>,
 ) -> Response {
-    if !matches!(
-        ui_state(&state, cookie_header(&headers)).await,
-        UiAccess::LoggedIn
-    ) {
-        return redirect("/ui");
-    }
-
     let mut cfg = state.config().await;
     let m = &mut cfg.maintenance;
     // A blank or unparseable duration keeps the current one. Zero retention with
@@ -549,17 +530,7 @@ pub(crate) async fn ui_save_retention(
 /// written out first, resume data included: without that, the next start would re-hash
 /// every finished file, which on a library of this size is minutes of disk work for
 /// nothing. Playback in progress does stop, hence the confirmation on the page.
-pub(crate) async fn ui_shutdown(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> Response {
-    if !matches!(
-        ui_state(&state, cookie_header(&headers)).await,
-        UiAccess::LoggedIn
-    ) {
-        return redirect("/ui");
-    }
-
+pub(crate) async fn ui_shutdown(State(state): State<Arc<AppState>>) -> Response {
     // The reply has to reach the browser before the process goes away, so the exit happens
     // just after this response has been handed back rather than inside the handler.
     tokio::spawn(async move {
@@ -580,14 +551,7 @@ pub(crate) async fn ui_shutdown(
 /// The same path a real warning takes, deliberately: a test that goes out through a different
 /// door proves nothing about the door being tested. Not throttled, because pressing the button
 /// is the request.
-pub(crate) async fn ui_test_notification(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> Response {
-    if let Some(page) = require_login(&state, cookie_header(&headers)).await {
-        return page;
-    }
-
+pub(crate) async fn ui_test_notification(State(state): State<Arc<AppState>>) -> Response {
     let cfg = state.config().await;
     if cfg.maintenance.notify_webhook_url.trim().is_empty() {
         return settings_page(
@@ -653,13 +617,6 @@ pub(crate) async fn ui_save_engine(
     headers: HeaderMap,
     Form(form): Form<EngineForm>,
 ) -> Response {
-    if !matches!(
-        ui_state(&state, cookie_header(&headers)).await,
-        UiAccess::LoggedIn
-    ) {
-        return redirect("/ui");
-    }
-
     let mut cfg = state.config().await;
     let t = &mut cfg.torrent;
     t.max_active_torrents =
@@ -765,6 +722,32 @@ pub(crate) async fn require_login(state: &AppState, cookies: Option<&str>) -> Op
     }
 }
 
+/// The gate in front of every page and action that needs somebody logged in.
+///
+/// One place, applied to the routes as a layer, rather than a line at the top of each handler.
+/// It was the latter, and in two spellings: nine handlers called `require_login` and five wrote
+/// the same check out by hand. Both did the same thing, which is the good case; the bad case is
+/// a handler added later with neither, and nothing at all to notice it. A gate the router
+/// applies cannot be forgotten by a handler that does not know about it.
+///
+/// The pages that must work while logged out — the login screen itself, the first-run setup,
+/// and logging out — are deliberately not behind it.
+pub(crate) async fn gate(
+    State(state): State<Arc<AppState>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let cookies = request
+        .headers()
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    if let Some(refused) = require_login(&state, cookies.as_deref()).await {
+        return refused;
+    }
+    next.run(request).await
+}
+
 #[derive(serde::Deserialize)]
 pub(crate) struct TomlForm {
     toml: String,
@@ -775,13 +758,6 @@ pub(crate) async fn ui_save_toml(
     headers: HeaderMap,
     Form(form): Form<TomlForm>,
 ) -> Response {
-    if !matches!(
-        ui_state(&state, cookie_header(&headers)).await,
-        UiAccess::LoggedIn
-    ) {
-        return redirect("/ui");
-    }
-
     // Parsed before anything is written, so a typo cannot destroy a working file.
     let mut parsed = match crate::webui::parse_config(&form.toml) {
         Ok(c) => c,

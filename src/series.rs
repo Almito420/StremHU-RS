@@ -218,26 +218,24 @@ pub fn parse(name: &str) -> Option<SeriesInfo> {
             });
         }
     }
-    if let Some(c) = SEASON_ONLY.captures(&lower) {
-        if let Some(season) = num(c.get(1)).or_else(|| num(c.get(2))) {
+    if let Some(c) = SEASON_ONLY.captures(&lower)
+        && let Some(season) = num(c.get(1)).or_else(|| num(c.get(2))) {
             return Some(SeriesInfo {
                 seasons: vec![season],
                 episodes: Vec::new(),
             });
         }
-    }
 
     // Nothing named a season. Strip the numeric noise before trusting any number,
     // so `2160p` and `2014` cannot become episode numbers.
     let cleaned = NOISE.replace_all(&lower, " ");
-    if let Some(c) = LONE_EPISODE.captures(&cleaned) {
-        if let Some(episode) = num(c.get(1)).or_else(|| num(c.get(2))) {
+    if let Some(c) = LONE_EPISODE.captures(&cleaned)
+        && let Some(episode) = num(c.get(1)).or_else(|| num(c.get(2))) {
             return Some(SeriesInfo {
                 seasons: Vec::new(),
                 episodes: vec![episode],
             });
         }
-    }
     None
 }
 

@@ -840,11 +840,10 @@ impl AppState {
         let now = crate::state::now();
         {
             let mut last = self.last_notice.write().await;
-            if let Some(at) = last.get(kind) {
-                if now.saturating_sub(*at) < INTERVAL {
+            if let Some(at) = last.get(kind)
+                && now.saturating_sub(*at) < INTERVAL {
                     return;
                 }
-            }
             last.insert(kind.to_string(), now);
         }
         self.notify(message).await;
@@ -916,17 +915,15 @@ impl AppState {
                     other.info_hash == item.info_hash && !keys.contains(&other.key())
                 })
                 .count();
-            if others == 0 && !item.torrent_file.is_empty() {
-                if let Err(e) = std::fs::remove_file(&item.torrent_file) {
-                    if e.kind() != std::io::ErrorKind::NotFound {
+            if others == 0 && !item.torrent_file.is_empty()
+                && let Err(e) = std::fs::remove_file(&item.torrent_file)
+                    && e.kind() != std::io::ErrorKind::NotFound {
                         tracing::warn!(
                             path = %item.torrent_file,
                             error = %e,
                             "could not remove the .torrent"
                         );
                     }
-                }
-            }
         }
         removed
     }
@@ -958,11 +955,10 @@ impl AppState {
         if !item.torrent_file.is_empty() {
             // Not fatal: the data is what matters, and a leftover .torrent is litter
             // the folder sweep collects later.
-            if let Err(e) = std::fs::remove_file(&item.torrent_file) {
-                if e.kind() != std::io::ErrorKind::NotFound {
+            if let Err(e) = std::fs::remove_file(&item.torrent_file)
+                && e.kind() != std::io::ErrorKind::NotFound {
                     tracing::warn!(path = %item.torrent_file, error = %e, "could not remove the .torrent");
                 }
-            }
         }
         Ok(())
     }

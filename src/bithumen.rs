@@ -562,11 +562,10 @@ fn details_title(row: &str) -> Option<String> {
             continue;
         }
         let tag = rest.split_once('>').map(|(t, _)| t).unwrap_or(rest);
-        if let Some(title) = crate::ncore::attribute(tag, "title") {
-            if !title.trim().is_empty() {
+        if let Some(title) = crate::ncore::attribute(tag, "title")
+            && !title.trim().is_empty() {
                 return Some(title);
             }
-        }
         // The plain link is the name, so if it has no title the visible text is the whole
         // name: the site only adds a title when it had to shorten it.
         return None;

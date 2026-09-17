@@ -195,8 +195,8 @@ pub(crate) async fn play(
         crate::app::make_room_for(&state, &target, needed).await;
     }
 
-    if let Some(existing) = existing_dir {
-        if let Err(e) = crate::disk::space_at_least(&existing, needed) {
+    if let Some(existing) = existing_dir
+        && let Err(e) = crate::disk::space_at_least(&existing, needed) {
             let message = format!("Nincs hely a torrent saját mappájában: {e}");
             tracing::error!("{message}");
             if cfg.maintenance.notify_disk {
@@ -205,7 +205,6 @@ pub(crate) async fn play(
             return (StatusCode::INSUFFICIENT_STORAGE, format!("{message}
 ")).into_response();
         }
-    }
 
     // Which disk, decided here so the answer can be acted on: a fall-over to the second disk
     // and a refusal for want of room are both things the owner should hear about at the
@@ -515,7 +514,14 @@ pub(crate) async fn pump(
         .context("seek")?;
 
     let mut offset = start;
-    let mut buf = vec![0u8; chunk as usize];
+    // What has gone out but has not been written into the record yet.
+    //
+    // Kept here and handed over in batches rather than one call per chunk, because each call
+    // takes the write lock on the whole store. A second is the longest any of this waits, and
+    // the only thing at stake in that second is how much of the file the record believes was
+    // watched, which is read minutes later by the deletion round.
+    let mut pending: Vec<(u64, u64)> = Vec::new();
+    let mut last_recorded = std::time::Instant::now();
 
     while offset <= end {
         // Small pieces of the file until the first one has gone out, then the configured size.
@@ -535,10 +541,27 @@ pub(crate) async fn pump(
         entry.advance_reader(reader_id, entry.piece_of(offset)).await;
         wait_for(entry, offset, offset + want - 1, timeout, poll).await?;
 
-        let slice = &mut buf[..want as usize];
-        file.read_exact(slice)
-            .await
-            .with_context(|| format!("reading {want} bytes at {offset}"))?;
+        // Read straight into the buffer that will be handed over, rather than into a scratch
+        // one and copied out of it.
+        //
+        // Every chunk leaves this loop owned by the response, so it has to be its own
+        // allocation either way; what was avoidable was doing the work twice. Reading into a
+        // reused array and then copying it into the outgoing buffer meant a megabyte of
+        // copying per chunk, seventy thousand times over a large film. `read_buf` fills the
+        // uninitialised capacity directly, so there is no clearing beforehand either.
+        let mut piece = bytes::BytesMut::with_capacity(want as usize);
+        while (piece.len() as u64) < want {
+            let read = file
+                .read_buf(&mut piece)
+                .await
+                .with_context(|| format!("reading {want} bytes at {offset}"))?;
+            if read == 0 {
+                anyhow::bail!(
+                    "the file ended at {} while {want} bytes were wanted at {offset}",
+                    offset + piece.len() as u64
+                );
+            }
+        }
 
         // The first chunk out is what ends the warm-up: from here the window widens to what
         // the configuration asks for, because the job changes from "finish one piece" to
@@ -547,20 +570,40 @@ pub(crate) async fn pump(
             .started
             .store(true, std::sync::atomic::Ordering::Relaxed);
 
-        if tx.send(Ok(Bytes::copy_from_slice(slice))).await.is_err() {
-            // Normal: the player seeked or stopped.
+        if tx.send(Ok(piece.freeze())).await.is_err() {
+            // Normal: the player seeked or stopped. What it did receive still counts.
             tracing::debug!(offset, "reader closed the connection");
+            store
+                .record_served_many(key, &pending, crate::state::now())
+                .await;
             return Ok(());
         }
         // Counted only once the bytes are actually on their way to the player, which
         // is the whole basis for deciding later that this was watched.
-        store
-            .record_served(key, offset, want, crate::state::now())
-            .await;
+        pending.push((offset, want));
+        if last_recorded.elapsed() >= RECORD_EVERY {
+            store
+                .record_served_many(key, &pending, crate::state::now())
+                .await;
+            pending.clear();
+            last_recorded = std::time::Instant::now();
+        }
         offset += want;
     }
+    // Whatever is left, before this reader goes. A player that stops mid-file must still be
+    // credited with what it did watch.
+    store
+        .record_served_many(key, &pending, crate::state::now())
+        .await;
     Ok(())
 }
+
+/// How long served bytes may wait before they are written into the record.
+///
+/// A second. The record is read by the deletion round, minutes later at the earliest, so this
+/// is not information anybody needs sooner; and every write of it takes the lock that guards
+/// the whole store, which at a megabyte a chunk was sixty times a second.
+const RECORD_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// How much to hand over at a time before playback has started.
 ///

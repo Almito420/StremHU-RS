@@ -206,12 +206,11 @@ pub fn title_of(release: &str) -> (String, Option<u32>) {
         let bare = word.trim_matches(|c: char| c == '(' || c == ')' || c == '[' || c == ']');
         // A year ends the title and is worth keeping: it is what tells two films of the same
         // name apart, and TMDB takes it as a hint.
-        if let Ok(value) = bare.parse::<u32>() {
-            if (1900..=2100).contains(&value) {
+        if let Ok(value) = bare.parse::<u32>()
+            && (1900..=2100).contains(&value) {
                 year = Some(value);
                 break;
             }
-        }
         // A season or episode marker ends it too, and means nothing to TMDB.
         if crate::series::parse(bare).is_some() {
             break;

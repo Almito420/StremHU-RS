@@ -462,12 +462,11 @@ impl Library {
                 continue;
             };
             let path = self.resume_path(&hash).await;
-            if let Some(parent) = path.parent() {
-                if let Err(e) = std::fs::create_dir_all(parent) {
+            if let Some(parent) = path.parent()
+                && let Err(e) = std::fs::create_dir_all(parent) {
                     tracing::warn!(error = %e, "cannot create the resume folder");
                     continue;
                 }
-            }
             let tmp = path.with_extension("resume.tmp");
             if let Err(e) = std::fs::write(&tmp, &bytes) {
                 tracing::warn!(error = %e, "cannot write resume data");
@@ -619,11 +618,10 @@ impl Library {
             }
             // Only once per torrent per batch: the recheck reads everything the torrent still
             // has, and doing it after each file of a pack would be the same work over again.
-            if recheck {
-                if let Err(e) = entry.torrent.force_recheck() {
+            if recheck
+                && let Err(e) = entry.torrent.force_recheck() {
                     tracing::warn!(key, error = %e, "could not start the recheck");
                 }
-            }
         }
         // What is wanted shrank, and with the rest complete this torrent is a seeder again.
         // Saying so promptly is what keeps its seeding time counting.
@@ -1129,11 +1127,10 @@ async fn deadline_loop(lib: Arc<Library>) {
             *active = plan.set.keys().copied().collect();
         }
 
-        if let Some(err) = lib.session.pump_alerts() {
-            if let Some(real) = worth_reporting(&err) {
+        if let Some(err) = lib.session.pump_alerts()
+            && let Some(real) = worth_reporting(&err) {
                 tracing::warn!("libtorrent: {real}");
             }
-        }
 
         // Resume data asked for on an earlier tick arrives through the same alert queue,
         // so it is collected right after pumping it.
@@ -1143,7 +1140,7 @@ async fn deadline_loop(lib: Arc<Library>) {
         // Every so often rather than every tick: this loop runs several times a second,
         // and writing a resume file that often would be pure disk churn for data that
         // only matters at the next start.
-        if ticks % resume_every_ticks == 0 {
+        if ticks.is_multiple_of(resume_every_ticks) {
             let mut asked: Vec<String> = Vec::new();
             for (_, entry) in lib.open().await {
                 if asked.iter().any(|h| *h == entry.info_hash) {

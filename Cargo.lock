@@ -1690,6 +1690,7 @@ dependencies = [
  "argon2",
  "axum",
  "axum-server",
+ "bytes",
  "chrono",
  "cmake",
  "getrandom 0.4.3",

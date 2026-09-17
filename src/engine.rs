@@ -728,12 +728,8 @@ mod tests {
     #[test]
     fn scattered_completion_is_worthless_for_streaming() {
         let mut have = vec![0u8; 100];
-        for i in 0..8 {
-            have[i] = 1;
-        }
-        for i in 16..100 {
-            have[i] = 1;
-        }
+        have[..8].fill(1);
+        have[16..].fill(1);
         assert_eq!(have.iter().filter(|b| **b == 1).count(), 92);
         assert_eq!(contiguous_from(&have, 0), 8, "only the front matters");
     }

@@ -130,7 +130,7 @@ pub fn manifest(name: &str, version: &str) -> Manifest {
 /// Filed under an IMDb id, which is what makes the rest of it work: Stremio fills in the
 /// detail page from its own metadata addon, and the stream request that follows comes back to
 /// us with an id our search already understands.
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Meta {
     pub id: String,
     #[serde(rename = "type")]
@@ -141,19 +141,6 @@ pub struct Meta {
     pub description: Option<String>,
     #[serde(rename = "releaseInfo", skip_serializing_if = "Option::is_none")]
     pub release_info: Option<String>,
-}
-
-impl Clone for Meta {
-    fn clone(&self) -> Self {
-        Self {
-            id: self.id.clone(),
-            kind: self.kind.clone(),
-            name: self.name.clone(),
-            poster: self.poster.clone(),
-            description: self.description.clone(),
-            release_info: self.release_info.clone(),
-        }
-    }
 }
 
 #[derive(Debug, Serialize)]

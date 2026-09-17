@@ -158,8 +158,8 @@ pub(crate) async fn stream_list(
     // actions, and the viewer sees the same blank screen for both. Measured on a real request:
     // X-Faktor S09E02 was on the tracker, was found by the search, and was dropped because its
     // one seeder had gone offline overnight.
-    if usable.is_empty() {
-        if let Some(se) = wanted_episode(&req) {
+    if usable.is_empty()
+        && let Some(se) = wanted_episode(&req) {
             let named: Vec<&Torrent> = found
                 .iter()
                 .filter(|t| {
@@ -188,7 +188,6 @@ pub(crate) async fn stream_list(
                 );
             }
         }
-    }
 
     // Over HTTPS whenever the TLS listener is up, and this is not a nicety.
     //
@@ -481,6 +480,91 @@ where
 ///
 /// Returns which rung answered, because that is the thing worth having in the log when
 /// somebody asks why a particular episode could or could not be played.
+/// One way of asking one tracker one question.
+///
+/// The ladder is four of these in order, and writing them out as data rather than as four
+/// copies of the same block is the point: what differs between them is a tracker, a field and
+/// a term, and that is all this says. Adding a fifth way to ask is a line in a list.
+struct Rung<'a> {
+    tracker: crate::tracker::Tracker,
+    /// What the log calls it, so a finished search can say which way of asking answered.
+    label: &'static str,
+    /// The tracker's own name for the field being searched. Only nCore has more than one.
+    by: &'static str,
+    term: &'a str,
+}
+
+/// The four ways of asking, in the order they are tried.
+///
+/// The exact handle before the title, and the first tracker before the second. That last part
+/// is the owner's rule and not a preference: the account with fifteen years of history on it is
+/// asked first, and the second tracker is for the title it does not have.
+fn rungs<'a>(plan: &'a SearchPlan, bithumen: bool) -> Vec<Rung<'a>> {
+    use crate::ncore::{SEARCH_BY_IMDB, SEARCH_BY_NAME};
+    use crate::tracker::Tracker;
+
+    let mut out = Vec::with_capacity(2 + plan.names.len() * 2);
+    // nCore by id: small and exact, measured at twenty-three rows for an eight-season series,
+    // so in the ordinary case the whole search is this one request.
+    if let Some(imdb) = &plan.imdb {
+        out.push(Rung {
+            tracker: Tracker::Ncore,
+            label: "ncore/imdb",
+            by: SEARCH_BY_IMDB,
+            term: imdb,
+        });
+    }
+    // And by title, because a great many Hungarian uploads carry no id at all. For a Hungarian
+    // series this is not a fallback for odd cases, it is usually the rung that answers.
+    for term in &plan.names {
+        out.push(Rung {
+            tracker: Tracker::Ncore,
+            label: "ncore/name",
+            by: SEARCH_BY_NAME,
+            term,
+        });
+    }
+    if bithumen {
+        // The second tracker does answer an id, measured: eleven rows for tt0412142, every one
+        // of them carrying it. So this rung is worth having and not a formality.
+        if let Some(imdb) = &plan.imdb {
+            out.push(Rung {
+                tracker: Tracker::Bithumen,
+                label: "bithumen/imdb",
+                by: SEARCH_BY_IMDB,
+                term: imdb,
+            });
+        }
+        for term in &plan.names {
+            out.push(Rung {
+                tracker: Tracker::Bithumen,
+                label: "bithumen/name",
+                by: SEARCH_BY_NAME,
+                term,
+            });
+        }
+    }
+    out
+}
+
+/// Runs the ladder: the exact handle first, the title second, and the second tracker only
+/// after both of those came up short on the first.
+///
+/// Each rung is reached only because the one before it did not answer the request, so nothing
+/// here is speculative traffic.
+///
+/// Returns which rung answered, because that is the thing worth having in the log when
+/// somebody asks why a particular episode could or could not be played.
+///
+/// No category narrowing, and that is a correction rather than a preference. It was added once
+/// to cut a common title from sixty-seven pages to one, using a list of category names worked
+/// out from the shape of the ones that happened to appear in a few results. The list was wrong:
+/// on this tracker a Hungarian-audio release is `hd_hun` and an original-audio one is plain
+/// `hd`, not `hd_eng`, which does not exist. Every release in its original audio was silently
+/// filtered away. Measured: "Soulm8te" returns four hits unfiltered and none at all through the
+/// narrowing. The lesson is not that the list needed fixing, but that a filter which can only
+/// remove things, built on a guess about somebody else's naming, fails silently and looks
+/// exactly like a search that found nothing.
 pub(crate) async fn run_ladder(
     state: &AppState,
     plan: &SearchPlan,
@@ -488,77 +572,24 @@ pub(crate) async fn run_ladder(
     filters: &crate::config::Filters,
 ) -> (Vec<Torrent>, &'static str) {
     let want = wanted_episode(req);
-    // No category narrowing, and this is a correction rather than a preference.
-    //
-    // It was added to cut a common title from sixty-seven pages to one, with a list of category
-    // names worked out from the shape of the ones that happened to appear in a few results.
-    // That list was wrong: on this tracker a Hungarian-audio release is `hd_hun` and an
-    // original-audio one is plain `hd`, not `hd_eng`, which does not exist. So every release in
-    // its original audio was silently filtered away. Measured: "Soulm8te" returns four hits
-    // unfiltered and none at all through the narrowing.
-    //
-    // The lesson is not that the list needs fixing. It is that a filter which can only remove
-    // things, built on a guess about somebody else's naming, fails silently and looks like a
-    // search that simply found nothing.
+    let bithumen = state.bithumen.read().await.is_some();
 
-    // nCore, by IMDb id. Small and exact: measured at twenty-three rows for an eight-season
-    // series, so this is one request in the ordinary case.
-    if let Some(imdb) = &plan.imdb {
-        let found = walk("ncore", imdb, want, |term, page| async move {
-            state
-                .ncore
-                .read()
-                .await
-                .search_in(crate::ncore::SEARCH_BY_IMDB, &term, page, &[])
-                .await
+    for rung in rungs(plan, bithumen) {
+        let found = walk(rung.label, rung.term, want, |term, page| {
+            let by = rung.by;
+            let tracker = rung.tracker;
+            async move {
+                match tracker {
+                    crate::tracker::Tracker::Ncore => {
+                        state.ncore.read().await.search_in(by, &term, page, &[]).await
+                    }
+                    crate::tracker::Tracker::Bithumen => bithumen_page(state, &term, page).await,
+                }
+            }
         })
         .await;
         if answers_the_request(&found, req, filters) {
-            return (found, "ncore/imdb");
-        }
-    }
-
-    // nCore, by title. Many Hungarian uploads carry no IMDb id at all, so this is not a
-    // fallback for odd cases: for a Hungarian series it is usually the rung that answers.
-    for term in &plan.names {
-        let found = walk("ncore", term, want, |term, page| async move {
-            state
-                .ncore
-                .read()
-                .await
-                .search_in(crate::ncore::SEARCH_BY_NAME, &term, page, &[])
-                .await
-        })
-        .await;
-        if answers_the_request(&found, req, filters) {
-            return (found, "ncore/name");
-        }
-    }
-
-    // BitHUmen, and only now. The rule is the owner's and it is not a preference: the account
-    // with fifteen years of history on it is asked first, and the second tracker is for the
-    // title it does not have.
-    if state.bithumen.read().await.is_none() {
-        return (Vec::new(), "nothing");
-    }
-    // It does answer an IMDb id, measured: eleven rows for tt0412142, every one of them
-    // carrying that id. So this rung is worth having and not a formality.
-    if let Some(imdb) = &plan.imdb {
-        let found = walk("bithumen", imdb, want, |term, page| async move {
-            bithumen_page(state, &term, page).await
-        })
-        .await;
-        if answers_the_request(&found, req, filters) {
-            return (found, "bithumen/imdb");
-        }
-    }
-    for term in &plan.names {
-        let found = walk("bithumen", term, want, |term, page| async move {
-            bithumen_page(state, &term, page).await
-        })
-        .await;
-        if answers_the_request(&found, req, filters) {
-            return (found, "bithumen/name");
+            return (found, rung.label);
         }
     }
 

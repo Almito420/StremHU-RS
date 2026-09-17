@@ -1034,11 +1034,10 @@ impl Config {
             PathBuf::from(&self.network.cert_cache_dir),
             base_dir().join("logs"),
         ];
-        if let Some(parent) = Path::new(&self.storage.state_path).parent() {
-            if !parent.as_os_str().is_empty() {
+        if let Some(parent) = Path::new(&self.storage.state_path).parent()
+            && !parent.as_os_str().is_empty() {
                 dirs.push(parent.to_path_buf());
             }
-        }
         for dir in dirs {
             if dir.is_dir() {
                 continue;
@@ -1078,11 +1077,10 @@ impl Config {
     /// A file found above is only accepted if it is recognisably ours, so an unrelated
     /// `config.toml` belonging to some other program cannot be picked up and then written to.
     pub fn path_from_env() -> PathBuf {
-        if let Ok(from_env) = std::env::var("STREMHU_CONFIG") {
-            if !from_env.trim().is_empty() {
+        if let Ok(from_env) = std::env::var("STREMHU_CONFIG")
+            && !from_env.trim().is_empty() {
                 return PathBuf::from(from_env);
             }
-        }
 
         let beside = base_dir().join("config.toml");
         if beside.is_file() {
@@ -1108,16 +1106,14 @@ impl Config {
     /// Environment overrides for the two secrets, so they can stay out of the file
     /// if that is preferred. Everything else is config-only by design.
     pub fn apply_env_overrides(&mut self) {
-        if let Ok(v) = std::env::var("NCORE_USERNAME") {
-            if !v.is_empty() {
+        if let Ok(v) = std::env::var("NCORE_USERNAME")
+            && !v.is_empty() {
                 self.ncore.username = v;
             }
-        }
-        if let Ok(v) = std::env::var("NCORE_PASSWORD") {
-            if !v.is_empty() {
+        if let Ok(v) = std::env::var("NCORE_PASSWORD")
+            && !v.is_empty() {
                 self.ncore.password = v;
             }
-        }
     }
 }
 

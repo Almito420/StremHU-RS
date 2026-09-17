@@ -67,7 +67,7 @@ impl Report {
                 torrents.len()
             ));
         }
-        other.sort_by(|a, b| b.1.cmp(&a.1));
+        other.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
         for (why, n) in other {
             out.push_str(&format!("\negyéb okból megtartva: {n} fájl ({why})"));
         }
@@ -314,7 +314,7 @@ pub async fn sweep_with<W: World>(
             kept: item.keep,
             watched: item.watched(cfg.watched_position_percent, cfg.watched_min_served_percent),
             owed_to_tracker: !item.ncore_torrent_id.is_empty()
-                && owed.keys.iter().any(|key| *key == owed_key),
+                && owed.keys.contains(&owed_key),
             // The list was read at the top of this run, and a run whose read failed was
             // abandoned before reaching here, so absence from it is an answer of now.
             //
@@ -330,9 +330,9 @@ pub async fn sweep_with<W: World>(
                     crate::tracker::Tracker::Ncore => item.tracker_figures_at.is_some(),
                     crate::tracker::Tracker::Bithumen => item.tracker_known_at.is_some(),
                 }
-                && !owed.keys.iter().any(|key| *key == owed_key),
+                && !owed.keys.contains(&owed_key),
             partial: item.partial,
-            streaming: streaming.iter().any(|h| *h == item.info_hash),
+            streaming: streaming.contains(&item.info_hash),
             // The torrent's clock, not this file's: the debt is the torrent's.
             seeded_secs: item.torrent_seeded_for(&all_items, now),
             // The file's own account, and whether it is the one holding the torrent open.
