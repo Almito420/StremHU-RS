@@ -504,6 +504,13 @@ pub(crate) async fn pump(
     store: &crate::state::Store,
     key: &str,
 ) -> Result<()> {
+    // How long the player waits for its first byte of this range.
+    //
+    // The stages before this are all timed and reported as "cold start", and they end where
+    // the torrent is handed to the engine. Everything after that — finding a peer, asking for
+    // the opening piece, getting it written and read back — was the one part of a slow start
+    // nobody could put a number on. One line per range, at the moment it stops being a guess.
+    let asked_at = std::time::Instant::now();
     // Wait before opening: right after a torrent is added the file may not exist.
     wait_for(entry, start, start, timeout, poll).await?;
     let mut file = tokio::fs::File::open(&entry.file_path)
@@ -570,6 +577,16 @@ pub(crate) async fn pump(
             .started
             .store(true, std::sync::atomic::Ordering::Relaxed);
 
+        if offset == start {
+            tracing::info!(
+                file = %entry.file_name,
+                from = start,
+                bytes = want,
+                first_byte_ms = asked_at.elapsed().as_millis() as u64,
+                "first bytes out"
+            );
+        }
+
         if tx.send(Ok(piece.freeze())).await.is_err() {
             // Normal: the player seeked or stopped. What it did receive still counts.
             tracing::debug!(offset, "reader closed the connection");
@@ -631,8 +648,17 @@ pub(crate) async fn wait_for(
     // twenty-five milliseconds and doubling costs a handful of extra checks and gives that
     // back.
     let mut interval = std::time::Duration::from_millis(25).min(poll);
+    // And no point ever being slower than the map is refreshed while somebody is blocked on it.
+    // The configured interval used to be the ceiling, so a reader that had been waiting a few
+    // seconds was checking every four hundred milliseconds a copy that is refreshed every
+    // hundred, and paid up to three hundred of those for nothing after the piece had landed.
+    let ceiling = poll.min(crate::library::WAITING_POLL_INTERVAL);
 
     let began = std::time::Instant::now();
+    // Set as soon as this reader is known to be blocked, and dropped when it is not. While it
+    // is held the deadline loop re-reads the piece map briskly, because the only thing a
+    // waiting reader can see is what that loop has put there.
+    let mut blocked: Option<crate::library::Waiting> = None;
     loop {
         if entry.ready(from, to).await {
             if logged {
@@ -644,6 +670,9 @@ pub(crate) async fn wait_for(
                 );
             }
             return Ok(());
+        }
+        if blocked.is_none() {
+            blocked = Some(entry.begin_wait());
         }
         if !logged {
             tracing::info!(
@@ -662,7 +691,7 @@ pub(crate) async fn wait_for(
             );
         }
         tokio::time::sleep(interval).await;
-        interval = (interval * 2).min(poll);
+        interval = (interval * 2).min(ceiling);
     }
 }
 
