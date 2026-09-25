@@ -556,9 +556,16 @@ pub(crate) async fn pump(
         // reused array and then copying it into the outgoing buffer meant a megabyte of
         // copying per chunk, seventy thousand times over a large film. `read_buf` fills the
         // uninitialised capacity directly, so there is no clearing beforehand either.
+        //
+        // Bounded to exactly what was asked for. `read_buf` fills whatever spare capacity the
+        // buffer has, and a buffer is only ever guaranteed to hold *at least* what was asked
+        // of it, so without the limit a chunk could carry more bytes than the response
+        // promised in its Content-Length. That has not been seen; it is also not something to
+        // find out about from a player that silently refuses to start.
         let mut piece = bytes::BytesMut::with_capacity(want as usize);
+        let mut exactly = (&mut file).take(want);
         while (piece.len() as u64) < want {
-            let read = file
+            let read = exactly
                 .read_buf(&mut piece)
                 .await
                 .with_context(|| format!("reading {want} bytes at {offset}"))?;
@@ -648,17 +655,8 @@ pub(crate) async fn wait_for(
     // twenty-five milliseconds and doubling costs a handful of extra checks and gives that
     // back.
     let mut interval = std::time::Duration::from_millis(25).min(poll);
-    // And no point ever being slower than the map is refreshed while somebody is blocked on it.
-    // The configured interval used to be the ceiling, so a reader that had been waiting a few
-    // seconds was checking every four hundred milliseconds a copy that is refreshed every
-    // hundred, and paid up to three hundred of those for nothing after the piece had landed.
-    let ceiling = poll.min(crate::library::WAITING_POLL_INTERVAL);
 
     let began = std::time::Instant::now();
-    // Set as soon as this reader is known to be blocked, and dropped when it is not. While it
-    // is held the deadline loop re-reads the piece map briskly, because the only thing a
-    // waiting reader can see is what that loop has put there.
-    let mut blocked: Option<crate::library::Waiting> = None;
     loop {
         if entry.ready(from, to).await {
             if logged {
@@ -670,9 +668,6 @@ pub(crate) async fn wait_for(
                 );
             }
             return Ok(());
-        }
-        if blocked.is_none() {
-            blocked = Some(entry.begin_wait());
         }
         if !logged {
             tracing::info!(
@@ -691,7 +686,7 @@ pub(crate) async fn wait_for(
             );
         }
         tokio::time::sleep(interval).await;
-        interval = (interval * 2).min(ceiling);
+        interval = (interval * 2).min(poll);
     }
 }
 

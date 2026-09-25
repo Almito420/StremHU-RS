@@ -13,7 +13,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -183,58 +183,12 @@ pub struct Entry {
     ///
     /// Until it has, the read-ahead window is deliberately small. See `WARMUP_READAHEAD`.
     pub started: AtomicBool,
-
-    /// The deadline loop's doorbell, so a reader that has just blocked can ring it.
-    wake: Arc<tokio::sync::Notify>,
-    /// How many readers are sitting on this file waiting for pieces to arrive.
-    ///
-    /// The piece map a reader checks is not read from the engine by the reader itself: it is
-    /// refreshed by the deadline loop, on the loop's own cadence of four hundred milliseconds.
-    /// So a piece that lands is not noticed when it lands but at the next pass, and a reader
-    /// polling every twenty-five milliseconds cannot do anything about that — it is re-reading
-    /// a copy that has not changed. Measured against the cadence alone that is up to four
-    /// hundred milliseconds added to the first chunk of every playback, two hundred on average,
-    /// and the same again on every stall in the middle of a film, which is where a viewer sees
-    /// it as buffering.
-    ///
-    /// This is how the loop finds out that somebody is actually stuck, so it can refresh more
-    /// often for as long as that is true and go back to its ordinary pace afterwards.
-    waiting: AtomicUsize,
-}
-
-/// Held for as long as a reader is blocked on pieces. See `Entry::waiting`.
-///
-/// A guard rather than a pair of calls because the wait can end at a timeout, which returns
-/// through `?` from the middle of the loop, and a counter that only comes back down on the
-/// happy path would leave the loop running fast for ever.
-pub struct Waiting<'a>(&'a Entry);
-
-impl Drop for Waiting<'_> {
-    fn drop(&mut self) {
-        self.0.waiting.fetch_sub(1, Ordering::Relaxed);
-    }
 }
 
 impl Entry {
     /// How this entry is addressed, matching the record in the store.
     pub fn key(&self) -> String {
         crate::state::item_key(&self.info_hash, self.selected)
-    }
-
-    /// Says that a reader is now blocked, and rings the loop's doorbell once.
-    ///
-    /// Once, not on every poll: the doorbell only shortens the current sleep, and the count is
-    /// what keeps the loop brisk from then on. Ringing it three times a second would turn the
-    /// loop into a spin.
-    pub fn begin_wait(&self) -> Waiting<'_> {
-        self.waiting.fetch_add(1, Ordering::Relaxed);
-        self.wake.notify_one();
-        Waiting(self)
-    }
-
-    /// Whether anybody is blocked on this file right now.
-    pub fn someone_waiting(&self) -> bool {
-        self.waiting.load(Ordering::Relaxed) > 0
     }
 
     pub async fn register_reader(&self, piece: u32) -> u64 {
@@ -331,7 +285,7 @@ pub struct Library {
     ///
     /// Without this the backoff that keeps the server quiet while seeding would add up to two
     /// seconds to the start of every playback, which is the opposite of the point.
-    wake: Arc<tokio::sync::Notify>,
+    wake: tokio::sync::Notify,
     /// Bumped whenever the configuration is saved.
     ///
     /// The loop compares this instead of cloning the configuration on every pass. An atomic
@@ -373,7 +327,7 @@ impl Library {
             session,
             store,
             entries: RwLock::new(HashMap::new()),
-            wake: Arc::new(tokio::sync::Notify::new()),
+            wake: tokio::sync::Notify::new(),
             cfg,
             cfg_generation,
         });
@@ -856,8 +810,6 @@ impl Library {
             complete: RwLock::new(false),
             extras_promoted: AtomicBool::new(false),
             started: AtomicBool::new(false),
-            wake: self.wake.clone(),
-            waiting: AtomicUsize::new(0),
         });
 
         // Both ends of the file, asked for before anybody has asked to read them.
@@ -894,22 +846,24 @@ impl Library {
 
 /// How long the loop may sleep, given what is going on.
 ///
-/// Three paces, and which one applies is decided by what somebody is waiting for rather than by
-/// a setting. Nothing playing: seeding needs this loop for nothing but draining alerts, so two
-/// seconds. Playing and keeping up: the configured pace, a few times a second, enough to keep
-/// the deadline window aimed in front of the reader. Playing and stopped: as brisk as the piece
-/// map is worth re-reading, because until it is re-read a piece that has arrived does not exist
-/// as far as the waiting reader is concerned.
-fn loop_interval(blocked: bool, reading: bool, busy: Duration) -> Duration {
-    if blocked {
-        // Never slower than the ordinary pace, and never faster than it either if somebody has
-        // configured one that is already brisker than this.
-        WAITING_POLL_INTERVAL.min(busy)
-    } else if reading {
-        busy
-    } else {
-        IDLE_POLL_INTERVAL
-    }
+/// Nothing playing: seeding needs this loop for nothing but draining alerts, so two seconds.
+/// Something playing: the configured pace, a few times a second, enough to keep the deadline
+/// window aimed in front of the reader.
+///
+/// There was a third pace here for a while, four times brisker, applied while a reader was
+/// actually blocked on a piece — the piece map a reader reads is refreshed here and nowhere
+/// else, so the pace is also the granularity with which an arriving piece can be noticed. It
+/// was reverted. Refreshing that map means `torrent_handle::status()`, which libtorrent's own
+/// header describes as blocking until the session thread answers, and the moment it was being
+/// asked four times as often is the moment the session thread is building a swarm and writing
+/// a film to disk. Playback started downloading and then would not begin, and had to be closed
+/// and reopened on the player.
+///
+/// The latency it was meant to save is real and still there. The way to have it is the one the
+/// header points at: `post_status()` or the piece-completion alerts, which the loop is already
+/// draining, and which cost the session thread nothing.
+fn loop_interval(reading: bool, busy: Duration) -> Duration {
+    if reading { busy } else { IDLE_POLL_INTERVAL }
 }
 
 /// Drops the parts of a libtorrent message that are noise, and returns what is left.
@@ -948,16 +902,6 @@ fn worth_reporting(message: &str) -> Option<String> {
 /// that the first byte range of a new playback waits no longer than one pass before the
 /// deadlines start aiming at it.
 const IDLE_POLL_INTERVAL: Duration = Duration::from_secs(2);
-
-/// How often the piece map is re-read while a reader is actually blocked on it.
-///
-/// A hundred milliseconds, against the four hundred of the ordinary streaming pace. The map is
-/// only read from the engine here, so this interval is the granularity with which a piece that
-/// has landed can be noticed at all, and the moment a viewer is sitting in front of a black
-/// screen is the one moment that granularity is worth paying for. It applies only while
-/// somebody is stuck: with the stream running ahead of the reader nothing ever blocks, and the
-/// loop keeps its ordinary pace.
-pub(crate) const WAITING_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// How far ahead to fetch before the first byte has reached the player.
 ///
@@ -1006,8 +950,6 @@ async fn deadline_loop(lib: Arc<Library>) {
         // there is no read head to feed, so the only reason to come round again is to notice
         // that one has appeared, and that does not need checking three times a second.
         let mut anyone_reading = false;
-        // Somebody is not merely watching but waiting: a read that cannot be answered yet.
-        let mut anyone_blocked = false;
 
         for (key, entry) in entries {
             let heads: Vec<ReadHead> = entry
@@ -1036,7 +978,6 @@ async fn deadline_loop(lib: Arc<Library>) {
             // The loop still has to come round promptly while the grace period is running, or
             // the drop back to idle would happen a whole idle interval late.
             anyone_reading |= streaming;
-            anyone_blocked |= entry.someone_waiting();
 
             // The piece bitmap crosses the language boundary and allocates a vector the
             // length of the torrent's piece count, so it is only worth refreshing when
@@ -1237,7 +1178,7 @@ async fn deadline_loop(lib: Arc<Library>) {
         // Idle means seeding, and seeding needs nothing from this loop beyond draining the
         // alert queue. Backing off is the difference between a server that costs nothing
         // while it sits there and one that wakes the CPU a few times a second all evening.
-        let interval = loop_interval(anyone_blocked, anyone_reading, busy_interval);
+        let interval = loop_interval(anyone_reading, busy_interval);
         // A new reader cuts the wait short. While something is playing the interval is a few
         // hundred milliseconds anyway, so this matters for the first request of a playback,
         // which is exactly the one a viewer is waiting on.
@@ -1252,22 +1193,12 @@ async fn deadline_loop(lib: Arc<Library>) {
 mod tests {
     use super::*;
 
-    /// A blocked reader is the only thing that makes this loop hurry, and nothing makes it
-    /// hurry past the pace that was asked for.
+    /// The loop works only while something is being watched.
     #[test]
-    fn the_loop_hurries_only_for_somebody_who_is_waiting() {
+    fn the_loop_only_works_while_something_is_being_watched() {
         let busy = Duration::from_millis(400);
-        assert_eq!(loop_interval(false, false, busy), IDLE_POLL_INTERVAL, "nothing is playing");
-        assert_eq!(loop_interval(false, true, busy), busy, "playing and keeping up");
-        assert_eq!(
-            loop_interval(true, true, busy),
-            WAITING_POLL_INTERVAL,
-            "somebody is sitting in front of a black screen"
-        );
-        // A configuration brisker than the waiting pace is already brisk enough; being blocked
-        // must not slow it down.
-        let brisk = Duration::from_millis(50);
-        assert_eq!(loop_interval(true, true, brisk), brisk);
+        assert_eq!(loop_interval(false, busy), IDLE_POLL_INTERVAL, "nothing is playing");
+        assert_eq!(loop_interval(true, busy), busy, "something is playing");
     }
 
     /// The announce failures that mean nothing are dropped, and the ones that mean something
