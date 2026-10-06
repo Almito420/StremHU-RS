@@ -271,11 +271,10 @@ pub async fn sweep_with<W: World>(
         cfg
     };
 
-    let items = store.items().await;
-    // Kept whole: the seeding clock of a pack is worked out across every file taken from it.
-    let all_items = items.clone();
-    report.considered = items.len();
-    if items.is_empty() {
+    // Nothing on the disk: nobody to ask about, nothing to decide. Checked before the
+    // trackers are asked, because a private site should not be getting a login and a page
+    // fetch out of an empty library every evening.
+    if store.item_count().await == 0 {
         return report;
     }
 
@@ -292,6 +291,25 @@ pub async fn sweep_with<W: World>(
     } else {
         Owed::default()
     };
+
+    // Read after the trackers have been asked, and that order is the whole point.
+    //
+    // Asking is not only a question: the answer carries each torrent's transfer figures, and
+    // reading it writes them into the records. The records were being read first, so a round
+    // fetched the numbers it needed and then judged everything on the copy it had taken before
+    // they arrived. The effect was that fresh tracker data only ever took hold one round later.
+    //
+    // Seen from outside it looked like two different programs. The evening round at 20:00 kept
+    // two torrents as "still to seed"; the same round started by hand at 20:10, with nothing
+    // changed in between, deleted both. Same code, same settings; the second one was simply the
+    // first one that could see what the first had fetched.
+    let items = store.items().await;
+    // Kept whole: the seeding clock of a pack is worked out across every file taken from it.
+    let all_items = items.clone();
+    report.considered = items.len();
+    if items.is_empty() {
+        return report;
+    }
 
     let streaming = world.streaming_hashes().await;
     let mut doomed: Vec<Item> = Vec::new();
@@ -690,6 +708,12 @@ mod tests {
         streaming: Vec<String>,
         deleted: std::sync::Mutex<Vec<String>>,
         fail_delete: bool,
+        /// Written into when the tracker is asked, the way the real one does.
+        ///
+        /// Asking nCore reads a page that carries every torrent's transfer figures, and those
+        /// go straight into the records. A fake that only answers the question and writes
+        /// nothing cannot show whether the round sees what the asking produced.
+        records_figures_into: Option<Arc<Store>>,
     }
 
     impl Fake {
@@ -700,6 +724,7 @@ mod tests {
                 deleted: std::sync::Mutex::new(Vec::new()),
                 notified: std::sync::Mutex::new(Vec::new()),
                 fail_delete: false,
+                records_figures_into: None,
             }
         }
     }
@@ -717,6 +742,18 @@ mod tests {
             String::new()
         }
         async fn owed(&self) -> Result<Owed> {
+            if let Some(store) = &self.records_figures_into {
+                store
+                    .record_tracker_figures(
+                        crate::tracker::Tracker::Ncore,
+                        "4207293",
+                        2000,
+                        1000,
+                        "2.0",
+                        state::now(),
+                    )
+                    .await;
+            }
             match &self.owed {
                 Some(ids) => Ok(Owed {
                     keys: ids
@@ -801,6 +838,39 @@ mod tests {
         // carry it the way a real viewing would.
         item.mark_served(0, 950);
         item
+    }
+
+    /// What the tracker says this round has to count this round.
+    ///
+    /// Asking the tracker is also what writes its figures into the records, and the records
+    /// used to be read before the question was asked. A torrent the tracker had already let go
+    /// was therefore kept, every time, until some later round happened to re-read it — which is
+    /// why the evening round and the same round started by hand ten minutes later gave
+    /// different answers with nothing at all changed in between.
+    #[tokio::test]
+    async fn the_answer_fetched_this_round_decides_this_round() {
+        let now = state::now();
+        // Watched, and far too recent for the flat seeding rule to let it go on its own.
+        let mut item = ripe("h1", now);
+        item.added_at = now - 3600;
+        item.completed_at = Some(now - 3600);
+        let store = store_with(vec![item]).await;
+
+        let world = Fake {
+            // Not on the list any more: the tracker has let this one go.
+            owed: Some(Vec::new()),
+            records_figures_into: Some(store.clone()),
+            ..Fake::new()
+        };
+
+        let report = sweep(&world, &store, &deleting(), now).await;
+        assert_eq!(
+            report.deleted.len(),
+            1,
+            "the figures arrived in this round's own answer, so they decide it: {:?}",
+            report.kept
+        );
+        assert!(store.get("h1:0").await.is_none(), "and the record goes with it");
     }
 
     /// A tracker we hold nothing from is not asked at all.

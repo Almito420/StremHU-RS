@@ -937,6 +937,14 @@ impl Store {
     }
 
     /// How many play sources are being kept, for the periodic report.
+    /// How many downloads are on the books, without copying any of them.
+    ///
+    /// The deletion round asks this before it asks a tracker anything: with nothing on the
+    /// disk there is no question worth a private site's login page.
+    pub async fn item_count(&self) -> usize {
+        self.state.read().await.items.len()
+    }
+
     pub async fn source_count(&self) -> usize {
         self.state.read().await.sources.len()
     }
