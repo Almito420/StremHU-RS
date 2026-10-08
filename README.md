@@ -185,6 +185,17 @@ hátravan = (1 − arány) × (48 óra + 0.4 × letöltött GB) − eddig seedel
   `keep_seed_seconds` nincs beállítva, az adott tracker összes nem kitűzött torrentje törlődik.
 - **soha nem töröl olyan torrentből, amit épp néznek.** Az eredeti 04:00-as köre ezt nem
   vizsgálja.
+- **a kör arra a válaszra dönt, amit ő maga kért le.** A trackert megkérdezni nem csak kérdés: a
+  válasz hozza magával minden torrent forgalmi adatait, és a lekérés ezeket beleírja a
+  rekordokba. Amíg a rekordokat a kérdezés előtt olvastuk be, a kör pont azt az adatot nem látta,
+  amit ő maga töltött le, és a friss trackeradat csak egy körrel később hatott. Látszott is: az
+  esti kör 20:00-kor két torrentet seedelendőként megtartott, a kézzel indított ugyanaz a kör
+  20:10-kor mindkettőt törölte, közben semmi nem változott.
+
+A **kézi törlés** a letöltések oldalon egyik szabályt sem nézi: se megnézettséget, se seedelési
+időt, se a tracker listáját, még a „megtartás" jelzést sem. A szabályok azért vannak, hogy a
+szerver ne töröljön kérdezés nélkül; ha a gazda mondja, az a válasz. Annyi történik, hogy ha a
+tracker szerint még seedelni kellett volna, az bekerül a naplóba és a visszajelzésbe.
 
 ### Helytakarékos mód
 
@@ -222,6 +233,23 @@ A piece méret kiadásonként 0.5 és 16 MiB között van, tehát egy fix piece-
 másodperc alatti puffert adott, és a stream pár másodperc után megállt. Itt az ablak
 `readahead_bytes` (64 MB), vagyis minden torrenten ugyanannyi film.
 
+### A lejátszás indulása
+
+- **a fájl két szélét már nyitáskor megkéri.** A lejátszó minden fájlnál ugyanazt a két dolgot
+  csinálja: elolvassa a konténer fejlécét elöl, majd a legvégére ugrik a keresési indexért. Élőben
+  mérve a végére szóló kérés 1,6 másodperccel az első után érkezett, és öt másodpercnél tovább
+  tartott kiszolgálni, mire a lejátszó feladta és újracsatlakozott. Előre megkérve 402 ezredmásodperc.
+- **az első darab után negyed megabájttal indul**, nem a beállított egy megabájttal. Fél megabájtos
+  piece-eknél az egy megabájtos olvasás két piece-re vár, mielőtt egyetlen bájt elindulna.
+- **a torrent a saját kért halmazával jelentkezik be a trackerhez.** Egy torrent minden fájlja
+  kikapcsolva kerül a motorba, hogy egy évadcsomag ne kezdjen el olyan részeket húzni, amit senki
+  nem kért; a kérés viszont enélkül úgy ment ki, hogy semmit nem akarunk, ami a trackernek kész
+  seedet jelent, és a seednek nem ad peert. Mérve: a beállítás 195 ezredmásodperc, az első darab
+  harminc másodperc, a maradék két és fél gigabájt tizenegy. A javítás után az első darab két
+  másodperc.
+- **az indulás minden szakasza mérve van** a naplóban: mennyi ment a tracker `.torrent`-jére, a
+  lemezválasztásra, a motorra, és külön az, hogy az első bájt mikor ért a lejátszóhoz.
+
 ### Hálózat és lejátszás
 
 - **HTTPS a `local-ip` trükkel**: publikus wildcard DNS, ami a privát IP-re mutat, tanúsítványt
@@ -249,12 +277,22 @@ Fokonként legfeljebb húsz oldal, és a program a pontos találat után is megy
 részhez az összes verziót összeszedje; akkor áll meg, ha két egymást követő oldal nem hozott újat.
 Filmnél egyetlen oldal jön le.
 
-A kérés kategóriára szűkítve megy, film vagy sorozat. Élőben mérve: a „House" hatezer-hatszáz sor
-szűrés nélkül, sorozatra szűkítve négyszáztizenöt, az évaddal együtt tizenhat — hatvanhét oldalról
-egyre. Kemény szűkítés, tehát egy rossz kategóriába feltöltött kiadás kiesik.
+**Kategóriára nem szűkít**, és ez javítás, nem elhagyás. Volt egy menet, amikor a kérés a
+kategórianevek listájával ment ki, mert az a „House"-t hatezer-hatszáz sorról tizenhatra vitte le.
+A lista rossz volt: ezen a trackeren a magyar hangú kiadás `hd_hun`, az eredeti hangú viszont sima
+`hd`, nem `hd_eng`, ami nem is létezik — vagyis minden eredeti hangú kiadás némán kiesett. Mérve: a
+„Soulm8te" szűrés nélkül négy találat, a szűkítéssel nulla. Egy szűrő, ami csak elvenni tud, és
+valaki más elnevezési szokásáról szóló feltevésre épül, pont úgy néz ki hibásan, mint egy keresés,
+ami nem talált semmit.
 
-Egy cím találati listája pár percig megmarad, minden újabb kérés újraindítja az óráját, üres
-eredmény viszont soha nem marad meg: azt legközelebb újra lekérdezi, hátha közben felkerült.
+Egy cím találati listája pár percig megmarad, és minden újabb kérés újraindítja az óráját. A
+tárolt listát viszont **csak akkor használja, ha a kért részre tényleg ad lejátszható választ** —
+a létra az első olyan fokon áll meg, amelyik választ ad, és hogy melyik fok az, az epizódtól függ.
+Enélkül egy rész válaszából szolgáltuk ki az egész sorozatot: az `X-Faktor` tizenegyedik évada egy
+teljes évadcsomag a második trackeren, a találatok első oldalán, négy seederrel, és nem lehetett
+lejátszani. Az új találatok hozzáadódnak a tárolthoz, nem a helyére kerülnek, tehát két rész, amit
+két különböző tracker szolgál ki, mindkettő benne marad. Üres eredmény soha nem marad meg: azt
+legközelebb újra lekérdezi, hátha közben felkerült.
 
 ### Sorrend a stream listában
 
