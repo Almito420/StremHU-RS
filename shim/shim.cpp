@@ -1,4 +1,4 @@
-// C ABI over libtorrent 2.0.11.
+// C ABI over libtorrent 2.x.
 //
 // Only what the streaming server needs is exposed, and the reason this layer
 // exists at all is `set_piece_deadline`. Measuring the alternatives on a real
@@ -14,7 +14,9 @@
 #include <libtorrent/session.hpp>
 #include <libtorrent/settings_pack.hpp>
 #include <libtorrent/add_torrent_params.hpp>
+#include <libtorrent/load_torrent.hpp>
 #include <libtorrent/torrent_info.hpp>
+#include <libtorrent/version.hpp>
 #include <libtorrent/torrent_handle.hpp>
 #include <libtorrent/torrent_status.hpp>
 #include <libtorrent/download_priority.hpp>
@@ -71,8 +73,23 @@ struct Torrent
 {
 	lt::torrent_handle handle;
 	// Kept so file metadata stays available even before the torrent is checked.
-	std::shared_ptr<lt::torrent_info> info;
+	// const because the 2.1 ABI hands metadata out as `shared_ptr<torrent_info const>`,
+	// and nothing here mutates it. A non-const pointer still converts into this one
+	// on 2.0, so the same member serves both.
+	std::shared_ptr<lt::torrent_info const> info;
 };
+
+// The file layout accessor was renamed in 2.1: torrent_info::files() became
+// layout(), and the old name belongs to the deprecated API that the 2.1 ABI
+// compiles out. Both names return the same file_storage.
+lt::file_storage const& file_layout(lt::torrent_info const& ti)
+{
+#if LIBTORRENT_VERSION_NUM >= 20100
+	return ti.layout();
+#else
+	return ti.files();
+#endif
+}
 
 // Written out by hand rather than calling lt::aux::to_hex: the `aux` namespace is
 // internal and not exported from libtorrent's DLL, so linking against it fails.
@@ -482,24 +499,45 @@ LTS_API Torrent* lts_add_torrent_resume(
 	}
 	try
 	{
-		auto ti = std::make_shared<lt::torrent_info>(
-			reinterpret_cast<char const*>(data), static_cast<int>(len));
+		// The .torrent is parsed straight into add_torrent_params: the torrent_info
+		// constructor taking a buffer is deprecated and is compiled out under the 2.1
+		// ABI. This form also keeps the announce URLs and web seeds from the file.
+		lt::add_torrent_params atp = lt::load_torrent_buffer(
+			{reinterpret_cast<char const*>(data), static_cast<std::ptrdiff_t>(len)});
+		std::shared_ptr<lt::torrent_info const> const ti = atp.ti;
+		if (ti == nullptr)
+		{
+			set_error("add_torrent: torrent has no metadata");
+			return nullptr;
+		}
 
-		lt::add_torrent_params atp;
 		if (resume_data != nullptr && resume_len > 0)
 		{
 			lt::error_code ec;
-			atp = lt::read_resume_data(
+			lt::add_torrent_params resumed = lt::read_resume_data(
 				{reinterpret_cast<char const*>(resume_data), static_cast<long>(resume_len)}, ec);
 			if (ec)
 			{
 				// Stale or corrupt resume data is not a reason to refuse the torrent;
 				// dropping it costs a re-check and nothing else.
 				set_error(std::string("resume data ignored: ") + ec.message());
-				atp = lt::add_torrent_params();
+			}
+			else
+			{
+				// The metadata comes from the .torrent that was just parsed, resume
+				// data only carries state. Trackers and web seeds are kept when the
+				// blob has none: a private tracker's announce URL is the way back
+				// into the swarm, and older resume formats carry neither.
+				resumed.ti = atp.ti;
+				if (resumed.trackers.empty())
+				{
+					resumed.trackers = atp.trackers;
+					resumed.tracker_tiers = atp.tracker_tiers;
+				}
+				if (resumed.url_seeds.empty()) resumed.url_seeds = atp.url_seeds;
+				atp = std::move(resumed);
 			}
 		}
-		atp.ti = ti;
 		// Resume data carries the folder the data is already in, and that is the folder it
 		// has to stay in: with several disks in use, overwriting it would point libtorrent
 		// at a volume where the files are not, and every piece would be fetched again.
@@ -512,7 +550,7 @@ LTS_API Torrent* lts_add_torrent_resume(
 		if (atp.file_priorities.empty())
 		{
 			atp.file_priorities.assign(
-				static_cast<size_t>(ti->files().num_files()), lt::dont_download);
+				static_cast<size_t>(ti->num_files()), lt::dont_download);
 		}
 
 		auto t = std::make_unique<Torrent>();
@@ -610,8 +648,16 @@ LTS_API Torrent* lts_torrent_info_parse(
 	}
 	try
 	{
-		auto info = std::make_shared<lt::torrent_info>(
-			reinterpret_cast<char const*>(data), static_cast<int>(len));
+		// Same reason as in lts_add_torrent_resume: parse through
+		// add_torrent_params, then keep only the metadata object.
+		lt::add_torrent_params const loaded = lt::load_torrent_buffer(
+			{reinterpret_cast<char const*>(data), static_cast<std::ptrdiff_t>(len)});
+		std::shared_ptr<lt::torrent_info const> const info = loaded.ti;
+		if (info == nullptr)
+		{
+			set_error("torrent_info_parse: torrent has no metadata");
+			return nullptr;
+		}
 		auto t = std::make_unique<Torrent>();
 		t->info = info;
 		if (out_hash40 != nullptr)
@@ -636,13 +682,13 @@ LTS_API void lts_torrent_free(Torrent* t)
 LTS_API int lts_num_files(Torrent* t)
 {
 	if (t == nullptr || !t->info) return -1;
-	return t->info->files().num_files();
+	return t->info->num_files();
 }
 
 LTS_API int64_t lts_file_size(Torrent* t, int index)
 {
 	if (t == nullptr || !t->info) return -1;
-	auto const& fs = t->info->files();
+	auto const& fs = file_layout(*t->info);
 	if (index < 0 || index >= fs.num_files()) return -1;
 	return fs.file_size(lt::file_index_t{index});
 }
@@ -652,7 +698,7 @@ LTS_API int64_t lts_file_size(Torrent* t, int index)
 LTS_API int64_t lts_file_offset(Torrent* t, int index)
 {
 	if (t == nullptr || !t->info) return -1;
-	auto const& fs = t->info->files();
+	auto const& fs = file_layout(*t->info);
 	if (index < 0 || index >= fs.num_files()) return -1;
 	return fs.file_offset(lt::file_index_t{index});
 }
@@ -660,7 +706,7 @@ LTS_API int64_t lts_file_offset(Torrent* t, int index)
 LTS_API int lts_file_path(Torrent* t, int index, char const* save_path, char* buf, int buf_len)
 {
 	if (t == nullptr || !t->info) return -1;
-	auto const& fs = t->info->files();
+	auto const& fs = file_layout(*t->info);
 	if (index < 0 || index >= fs.num_files()) return -1;
 	try
 	{
@@ -695,7 +741,7 @@ LTS_API int lts_select_only_file(Torrent* t, int index)
 	if (t == nullptr || !t->info) return -1;
 	try
 	{
-		int const n = t->info->files().num_files();
+		int const n = t->info->num_files();
 		if (index < 0 || index >= n) return -1;
 		std::vector<lt::download_priority_t> prios(
 			static_cast<size_t>(n), lt::dont_download);
@@ -723,7 +769,7 @@ LTS_API int lts_set_file_priority(Torrent* t, int index, int priority)
 	if (priority < 0 || priority > 7) return -1;
 	try
 	{
-		int const n = t->info->files().num_files();
+		int const n = t->info->num_files();
 		if (index < 0 || index >= n) return -1;
 		t->handle.file_priority(
 			lt::file_index_t{index},

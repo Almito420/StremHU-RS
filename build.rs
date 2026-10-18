@@ -15,10 +15,23 @@ fn vcpkg_root() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("D:/vcpkg"))
 }
 
+/// An optional libtorrent installation to build against instead of vcpkg's.
+///
+/// Set to a prefix produced by `cmake --install` of libtorrent. It lets a newer
+/// version be tried without replacing the one every other build on the machine
+/// links against.
+fn libtorrent_prefix() -> Option<PathBuf> {
+    std::env::var("LIBTORRENT_PREFIX")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| PathBuf::from(value.trim()))
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=shim/shim.cpp");
     println!("cargo:rerun-if-changed=shim/CMakeLists.txt");
     println!("cargo:rerun-if-env-changed=VCPKG_ROOT");
+    println!("cargo:rerun-if-env-changed=LIBTORRENT_PREFIX");
 
     // The target, not the host: this asks which platform the binary is for.
     let windows = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
@@ -46,6 +59,12 @@ fn main() {
             "dll",
             Failure::Warn,
         );
+        // A LIBTORRENT_PREFIX build brings its own runtime. Copying it after vcpkg
+        // lets it replace the same-named DLL, which is the whole point of the
+        // override: the shim was linked against this one, not the installed one.
+        if let Some(prefix) = libtorrent_prefix() {
+            copy_runtime(&prefix.join("bin"), &target_dir, "dll", Failure::Fatal);
+        }
     } else {
         // `$ORIGIN` is the directory of the running binary, expanded by the loader. Both
         // levels are listed because the shim is copied next to the executable and the test
@@ -66,12 +85,21 @@ fn build_with_vcpkg() -> PathBuf {
         toolchain.display()
     );
 
-    cmake::Config::new("shim")
-        .generator("Visual Studio 17 2022")
+    let mut shim = cmake::Config::new("shim");
+    shim.generator("Visual Studio 17 2022")
         .define("CMAKE_TOOLCHAIN_FILE", &toolchain)
-        .define("VCPKG_TARGET_TRIPLET", "x64-windows")
-        .profile("Release")
-        .build()
+        .define("VCPKG_TARGET_TRIPLET", "x64-windows");
+    // A prefix build of libtorrent overrides the version vcpkg has installed.
+    // `<Package>_DIR` is what find_package(CONFIG) checks before searching, so
+    // the shim is compiled and linked against the headers and import library of
+    // that installation rather than vcpkg's.
+    if let Some(prefix) = libtorrent_prefix() {
+        shim.define(
+            "LibtorrentRasterbar_DIR",
+            prefix.join("lib/cmake/LibtorrentRasterbar"),
+        );
+    }
+    shim.profile("Release").build()
 }
 
 /// The Linux build: libtorrent comes from the distribution.
