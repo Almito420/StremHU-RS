@@ -216,10 +216,16 @@ pub struct Torrent {
     /// `"none"` opens the files uncached. The last one is the strongest and the engine's own
     /// documentation warns it can cost read performance, which matters here because this
     /// program seeds as well as downloads.
+    ///
+    /// libtorrent 2.1 on Windows uses the pread disk thread regardless of `disk_write_mode`,
+    /// and there `"write-through"` flushes after every write. On a drive without a write
+    /// cache that turns a steady download into bursts and costs throughput, which is why
+    /// `"normal"` is the default.
     pub disk_cache_mode: String,
     /// Bytes of finished pieces allowed to wait for the disk thread. Zero leaves the engine's
-    /// own default alone. This is real memory the process holds, so it is the number to turn
-    /// down if the engine's own buffers turn out to be what grows.
+    /// own default alone: 1 MB in libtorrent 2.0, but 100 MB in 2.1, where it also sizes the
+    /// pread write cache. This is real memory the process holds, so on 2.1 it is worth
+    /// setting explicitly; 32 MiB is a reasonable start.
     pub max_queued_disk_bytes: u32,
     /// How many torrents may be active at once, downloading and seeding together.
     ///

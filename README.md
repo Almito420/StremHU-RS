@@ -548,6 +548,9 @@ Minden a `config.toml`-ban van, és a fontosabbak a felületről is állítható
 | `filters.three_d_last` | a 3D kiadások a lista végére, alapból be |
 | `torrent.max_active_torrents` | egyszerre ennyi torrent aktív, `-1` a korlátlan |
 | `torrent.complete_extras_below_bytes` | a minta és az nfo mérethatára (512 MiB), a kért fájl negyedéig |
+| `torrent.disk_write_mode` | `disk` = közvetlen írás; 2.1 Windows alatt a pread útvonal miatt nincs hatása |
+| `torrent.disk_cache_mode` | `normal` = OS-gyorsítótár; a `write-through` minden darabot flushol, lassabb |
+| `torrent.max_queued_disk_bytes` | a várakozó írások felső korlátja; 2.1-ben 0 = 100 MB, ezért 32 MiB ajánlott |
 | `torrent.save_path_secondary` | ha az elsődleges mappa megtelt, ide ír |
 | `maintenance.space_saving` | helytakarékos mód |
 | `maintenance.sweep_at` / `sweep_on_start` | mikor fusson a törlés |

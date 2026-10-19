@@ -703,6 +703,72 @@ mod session_settings_tests {
             i32::MAX
         );
     }
+
+    /// The disk settings decide how much memory the engine holds and whether every
+    /// finished piece is flushed. A typo must fall back to the safe value, and the queue
+    /// limit must saturate rather than wrap around into a negative number.
+    #[test]
+    fn disk_settings_reach_the_engine_and_saturate() {
+        let cfg = Torrent {
+            disk_write_mode: "disk".into(),
+            disk_cache_mode: "normal".into(),
+            max_queued_disk_bytes: 33_554_432,
+            ..Torrent::default()
+        };
+        let s = SessionSettings::from_config(&cfg);
+        assert_eq!(s.disk_write_mode, 0, "disk means ordinary writes");
+        assert_eq!(s.mmap_file_size_cutoff, NEVER_MAP_BELOW_BLOCKS);
+        assert_eq!(s.disk_io_write_mode, 0, "normal keeps the OS cache");
+        assert_eq!(s.max_queued_disk_bytes, 33_554_432);
+
+        let cfg = Torrent {
+            max_queued_disk_bytes: u32::MAX,
+            ..Torrent::default()
+        };
+        assert_eq!(
+            SessionSettings::from_config(&cfg).max_queued_disk_bytes,
+            i32::MAX
+        );
+    }
+
+    /// libtorrent 2.1 on Windows always uses the pread disk thread, where `write-through`
+    /// means a flush after every write and `max_queued_disk_bytes` also sizes the write
+    /// cache. Both have to be told apart from the 2.0 defaults.
+    #[test]
+    fn cache_modes_are_translated_to_the_engines_own_numbers() {
+        assert_eq!(cache_mode("normal"), 0);
+        assert_eq!(cache_mode("write-through"), 3);
+        assert_eq!(cache_mode("none"), 2);
+        assert_eq!(cache_mode("nonsense"), 0, "a typo falls back to normal");
+    }
+
+    /// The tests must exercise the engine they were built against. A stale shim and DLL
+    /// beside the executable is exactly how a 2.1 build can quietly run as 2.0, so when
+    /// the caller names the expected version, the loaded one is checked rather than assumed.
+    #[test]
+    fn the_loaded_engine_is_the_one_expected() {
+        if let Ok(expected) = std::env::var("EXPECTED_LIBTORRENT") {
+            assert_eq!(libtorrent_version(), expected);
+        }
+    }
+
+    /// Memory mapping is only switched off for the plain disk mode: `memory` and `auto`
+    /// still want the mapping, so the cutoff has to stay at the engine's own value.
+    #[test]
+    fn only_disk_mode_switches_the_mapping_off() {
+        let disk = SessionSettings::from_config(&Torrent {
+            disk_write_mode: "disk".into(),
+            ..Torrent::default()
+        });
+        assert_eq!(disk.mmap_file_size_cutoff, NEVER_MAP_BELOW_BLOCKS);
+
+        let memory = SessionSettings::from_config(&Torrent {
+            disk_write_mode: "memory".into(),
+            ..Torrent::default()
+        });
+        assert_eq!(memory.disk_write_mode, 1);
+        assert_eq!(memory.mmap_file_size_cutoff, 0);
+    }
 }
 
 #[cfg(test)]

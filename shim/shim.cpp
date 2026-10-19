@@ -160,7 +160,9 @@ struct SessionSettings
 	int32_t disk_io_write_mode;
 	// Bytes of finished pieces allowed to wait for the disk thread. This is real memory the
 	// process holds, unlike the mapped pages, so it is the one to turn down if the engine's own
-	// buffers turn out to be what is growing.
+	// buffers turn out to be what is growing. Zero leaves the engine's default alone, which is
+	// 1 MB in 2.0 but 100 MB in 2.1; there it also sizes the pread write cache, so on 2.1 the
+	// caller should set it explicitly rather than rely on zero.
 	int32_t max_queued_disk_bytes;
 	// Below how many 16 kiB blocks a file is read and written normally instead of being mapped
 	// into memory. Zero leaves libtorrent's own value alone.

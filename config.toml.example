@@ -99,9 +99,10 @@ disk_write_mode = "disk"
 # ronthat, és ez a program seedel is, tehát folyamatosan olvas.
 disk_cache_mode = "normal"
 
-# Hány bájtnyi kész darab várhat a lemezszálra. 0 = a motor saját alapértelmezése.
-# Ez valódi memória, amit a folyamat fog, ellentétben a vetített lapokkal, tehát ha valaha a
-# motor saját pufferei nőnek meg, ez a kapcsoló.
+# Hány bájtnyi kész darab várhat a lemezszálra. 0 = a motor saját alapértelmezése, ami 2.0-ban
+# 1 MB, 2.1-ben viszont 100 MB (és egyben a pread írási gyorsítótár mérete). Ez valódi memória,
+# amit a folyamat fog, ellentétben a vetített lapokkal, tehát ha valaha a motor saját pufferei
+# nőnek meg, ez a kapcsoló. 2.1-hez érdemes explicit 33554432-ra (32 MiB) állítani.
 max_queued_disk_bytes = 0
 
 # Hány torrent lehet egyszerre aktív. -1 = korlátlan. A motor alapból három letöltésnél és

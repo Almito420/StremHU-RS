@@ -22,3 +22,6 @@ state.json.*
 *.dll
 *.pdb
 *.zip
+
+# The locally assembled 2.1.2 test package: binaries and instructions, not source.
+/lt212-test
