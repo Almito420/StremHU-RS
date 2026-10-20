@@ -1431,15 +1431,12 @@ mod tests {
         let mut f = film(20 * GB);
         f.furthest_byte = 20 * GB;
         // The first quarter served four times over: twenty gigabytes handed out, a quarter of
-        // the film actually seen.
+        // the film actually seen. The old running total would have counted all 20 GB; the
+        // coverage map counts each chunk once.
         for _ in 0..4 {
             f.mark_served(0, 5 * GB);
-            // What the old running total would have counted, kept as a comment because it is the
-        // reason this measure exists: 20 GB served on a 20 GB file, of which 15 GB was the
-        // same quarter re-read four times.
         }
-        assert_eq!(f.served_percent(), 25, "and the honest answer is a quarter");
-        assert_eq!(f.served_percent(), 25, "the honest answer");
+        assert_eq!(f.served_percent(), 25, "the honest answer is a quarter");
         assert!(!f.watched(90, 50));
     }
 
