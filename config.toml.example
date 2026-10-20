@@ -144,11 +144,12 @@ keep_seed_seconds = 864000
 cache_retention_seconds = 1209600
 # Mikor fusson a napi takarítás, helyi idő szerint.
 sweep_at = "20:00"
-# A fájl hány százalékáig kell eljutni, hogy megnézettnek számítson. 90 ott van, ahol a
-# stáblista kezdődik.
+# A fájl hány százalékát kell legalább egyszer kiszolgálni, hogy megnézettnek számítson.
+# 90 ott van, ahol a legtöbb filmnél a stáblista kezdődik. A félbehagyott és később
+# folytatott nézés összeadódik, az újraolvasás pedig nem számít többször.
 watched_position_percent = 90
-# És a fájl hány százalékát kellett ténylegesen kiszolgálni. Ez véd meg attól, hogy egy
-# végére ugrás teljes nézésnek számítson.
+# Alsó korlát ugyanerre a lefedettségre. A kettő közül a nagyobbik dönt, ezért a 90-es
+# pozíció mellett az 50 nem szigorít; akkor van jelentősége, ha nagyobbra állítod.
 watched_min_served_percent = 50
 # Csak megnézett fájlt töröljön. Kikapcsolva a kör a még meg nem nézetteket is elviheti,
 # ha már leteltek az idők.

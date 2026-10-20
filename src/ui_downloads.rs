@@ -326,8 +326,9 @@ pub(crate) async fn downloads_page(state: &AppState, message: Option<String>) ->
         // end of the file to find the seek index before it plays a frame. The second showed
         // the running total of bytes served, which counts the same minute again every time a
         // player re-requests it, so it passed 90% around the middle of a film. This is the
-        // same measure the watched decision uses, so the column and the verdict can no longer
-        // disagree.
+        // same distinct coverage the watched decision uses, so the column and the verdict
+        // cannot disagree. It is cumulative across sittings: a break at the resume point does
+        // not split the count and is not a skipped part.
         let watched = if candidate.watched {
             "megnézve".to_string()
         } else if item.play_count == 0 {

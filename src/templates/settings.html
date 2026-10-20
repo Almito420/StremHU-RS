@@ -89,7 +89,7 @@
   </div>
   <div class="row">
     <div>
-      <label for="wp">Megnézettnek számít (a film %-ától)</label>
+      <label for="wp">Megnézettnek számít (a film %-a)</label>
       <input id="wp" name="watched_position_percent" type="number" min="1" max="100"
              value="{{watched_position_percent}}">
     </div>
@@ -99,8 +99,10 @@
              value="{{watched_min_served_percent}}">
     </div>
   </div>
-  <p class="note">A 90% ott van, ahol a legtöbb filmnél a stáblista kezdődik. A második szám
-    azt akadályozza meg, hogy egy végére ugrás egész végignézésnek számítson.</p>
+  <p class="note">A 90% ott van, ahol a legtöbb filmnél a stáblista kezdődik. A százalék a fájl
+    különböző, legalább egyszer kiszolgált részeit méri, ezért a félbehagyott és később
+    folytatott nézés is összeadódik. A második szám ugyanerre egy alsó korlát; csak akkor
+    szigorít, ha nagyobb az elsőnél.</p>
   <p class="note">A törlés feltétele a megnézettség és a seedelési kötelezettség, nem az
     életkor. Egy csomagból az a fájl, aminek a saját seedelési ideje letelt, elmehet; a
     legutóbb elkészült fájl viszont marad, mert az tartja életben a torrentet és azzal fogy

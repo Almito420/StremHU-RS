@@ -18,12 +18,15 @@
 //! An addon never learns the playback position. Stremio keeps that to itself and
 //! syncs it to the viewer's own account; the addon's whole contract is handing over a
 //! URL, after which it sees nothing but HTTP range requests. So "watched" is inferred
-//! from bytes: the furthest offset a player asked for, and how much was delivered in
-//! total.
+//! from bytes: which distinct parts of the file were delivered to a player, and how
+//! much of it that adds up to.
 //!
-//! Both are needed. The furthest offset alone would count a jump to the end as a full
-//! viewing, and the total alone would miss someone who skipped the recap. Together
-//! they mean "got to the credits, having actually streamed the thing".
+//! The measure is cumulative across sittings. Stopping halfway and finishing the film
+//! the next day must count the same as watching it in one go, so the decision cannot
+//! depend on the longest unbroken stretch: a player that resumes leaves a gap in the
+//! coverage, and a break in the middle is not a part that was skipped. Re-reading a
+//! part does not inflate the count, and the minimum served percentage still keeps a
+//! seek to the credits from counting as a full viewing.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -232,11 +235,14 @@ impl Item {
 
     /// Whether the viewer got far enough for this to count as seen.
     ///
-    /// Two conditions, both from what was actually sent to a player. The furthest position
-    /// alone would count a jump to the end, and a player reads the tail before it plays a
-    /// frame, so on its own it reads as complete within seconds. Distinct coverage alone
-    /// would count someone who watched the first half twice.
-    pub fn watched(&self, position_percent: u8, min_served_percent: u8) -> bool {
+    /// The measure is distinct coverage: how much of the file was delivered to a player at
+    /// least once. It is cumulative across sittings, so stopping halfway and finishing later
+    /// counts the same as one uninterrupted viewing. The furthest offset alone would count a
+    /// jump to the end, and a player reads the tail before it plays a frame, so it is at the
+    /// end of the file within seconds of pressing play. Re-reading a part cannot inflate the
+    /// map, and `min_served_percent` is a second floor for configurations that ask for more
+    /// coverage than `coverage_percent`.
+    pub fn watched(&self, coverage_percent: u8, min_served_percent: u8) -> bool {
         // Somebody said so. That is a stronger statement than any measurement, and it is the
         // only way to account for an episode watched somewhere else.
         if self.watched_manually {
@@ -245,40 +251,15 @@ impl Item {
         if self.file_len == 0 || self.play_count == 0 {
             return false;
         }
-        // How far the viewer actually got, measured as the run of the file served from the
-        // beginning without a gap. Not the furthest byte reached: a player reads the tail of
-        // the file before it plays a frame, to find the seek index, so that number is at the
-        // end of the film within seconds of pressing play. Measured on a 50 minute episode
-        // watched for 35, the furthest byte said 100% and the coverage said 70%, and the two
-        // together were enough to call it watched.
-        let reached = self.watched_percent() >= position_percent as u64;
-        let covered = self.served_percent() >= min_served_percent as u64;
+        // How much of the file was actually delivered, rather than how far the player
+        // reached. A resume splits the coverage into two runs, and the longest run would
+        // ignore one of them; the distinct bits add up across sittings, which is what the
+        // viewer did. The tail probe is a few megabytes and cannot reach a 90% threshold on
+        // its own, while a 35-minute viewing of a 50-minute episode remains 70%.
+        let coverage = self.served_percent();
+        let reached = coverage >= coverage_percent as u64;
+        let covered = coverage >= min_served_percent as u64;
         reached && covered
-    }
-
-    /// The longest unbroken run of the file that was served, as a percentage of it.
-    ///
-    /// A run rather than a total, because a total counts the tail the player reads for the seek
-    /// index as if it had been watched. A run rather than a run from the very beginning, because
-    /// skipping the intro is normal and still ends in having watched the film.
-    pub fn watched_percent(&self) -> u64 {
-        if self.file_len == 0 {
-            return 0;
-        }
-        let chunks = self.file_len.div_ceil(COVERAGE_CHUNK);
-        let (mut best, mut run) = (0u64, 0u64);
-        for chunk in 0..chunks {
-            let byte = (chunk / 8) as usize;
-            let bit = 1u8 << (chunk % 8);
-            match self.served_map.get(byte) {
-                Some(slot) if slot & bit != 0 => {
-                    run += 1;
-                    best = best.max(run);
-                }
-                _ => run = 0,
-            }
-        }
-        (best * 100 / chunks.max(1)).min(100)
     }
 
     /// How much of the file has been sent at least once, as a percentage.
@@ -1479,6 +1460,45 @@ mod tests {
         assert!(!f.watched(90, 50), "the credits were never reached");
     }
 
+    /// A film stopped halfway and finished the next day is one viewing, not two. The
+    /// coverage map is cumulative, and the break at the resume point must not hide the
+    /// parts served on either side of it.
+    ///
+    /// This was the fault: the verdict used the longest unbroken run, so 45% before the
+    /// break and 50% after it read as 50% even though 95% of the film had been served.
+    #[test]
+    fn finishing_a_film_after_a_break_counts_as_watched() {
+        let mut f = film(20 * GB);
+        f.play_count = 2;
+        // First sitting: the opening 45%, then stop for the night.
+        f.mark_served(0, 9 * GB);
+        // Second sitting: resume a little after the last served byte and watch to the end.
+        // The small gap is what a player leaves when it reopens the stream.
+        f.mark_served(9 * GB + 200 * 1024 * 1024, 10 * GB);
+        f.furthest_byte = 20 * GB;
+
+        assert_eq!(f.served_percent(), 95);
+        assert!(f.watched(90, 50), "95% across two sittings is watched");
+
+        // The record survives a restart, so the decision must too.
+        let text = serde_json::to_string(&f).expect("serialises");
+        let back: Item = serde_json::from_str(&text).expect("parses");
+        assert!(back.watched(90, 50), "a restart does not undo it");
+    }
+
+    /// The other side of it: a break does not lower the bar. Two sittings that add up to
+    /// 85% are still not a viewing.
+    #[test]
+    fn a_break_does_not_lower_the_threshold() {
+        let mut f = film(20 * GB);
+        f.play_count = 2;
+        f.mark_served(0, 8 * GB);
+        f.mark_served(8 * GB + 200 * 1024 * 1024, 9 * GB);
+
+        assert_eq!(f.served_percent(), 85);
+        assert!(!f.watched(90, 50));
+    }
+
     #[test]
     fn a_download_that_was_never_opened_is_not_watched() {
         let mut f = film(20 * GB);
@@ -1536,7 +1556,7 @@ mod tests {
         f.furthest_byte = 10 * GB;
         f.mark_served(0, 7 * GB);
         f.mark_served(10 * GB - COVERAGE_CHUNK, COVERAGE_CHUNK); // a lejátszó a végét is beolvassa
-        assert_eq!(f.watched_percent(), 70);
+        assert_eq!(f.served_percent(), 70);
         assert!(!f.watched(90, 50));
     }
 

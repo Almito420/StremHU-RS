@@ -352,12 +352,16 @@ pub struct Maintenance {
     /// interval: deleting is not urgent, and a fixed evening time means it never
     /// happens while someone is likely to be watching.
     pub sweep_at: String,
-    /// How far into the file a viewer must have reached for it to count as watched.
-    /// 90 is where end credits usually start, and is what media servers use.
+    /// How much of the file must have been delivered at least once for it to count as
+    /// watched. 90 is where end credits usually start, and is what media servers use.
+    ///
+    /// Distinct coverage, not the furthest offset and not one unbroken run: a player reads
+    /// the end of the file for its seek index before it plays a frame, and stopping halfway
+    /// and finishing later must add up to one viewing.
     pub watched_position_percent: u8,
-    /// How much of the file must actually have been delivered. Guards against a seek
-    /// to the end registering as a complete viewing: jumping to the credits serves a
-    /// few megabytes, not half the film.
+    /// A second floor on the same distinct coverage. Only the higher of the two matters,
+    /// so it guards against a seek to the end only when it is set above the position
+    /// threshold; at the defaults the 90% position already requires more than this.
     pub watched_min_served_percent: u8,
     /// Only ever delete something that has been played at least once. Anything
     /// downloaded but never watched is left alone, however old it is, so a title

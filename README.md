@@ -159,8 +159,12 @@ takarékosság valódi, a kötelezettség viszont másfajta lesz, ezért ez dön
 Az eredetiben a törlés feltétele az, hogy *elindult-e* egy lejátszás (`playback_histories`
 legutóbbi sora). Itt egy bittérkép tartja számon, megabájtonként egy bit, hogy a fájlnak mely
 részei mentek ki tényleg a lejátszóhoz. Ezért az újraolvasás nem fújja fel: aki egy film első
-negyedét négyszer nézi meg, annál 25% marad, nem 100% lesz. Ezen felül a lejátszási pozíciónak
-is el kell érnie a beállított százalékot.
+negyedét négyszer nézi meg, annál 25% marad, nem 100% lesz. A bittérkép ülések között is
+megmarad, ezért a félbehagyott és később befejezett film ugyanúgy összeadódik, mint az egyben
+végignézett: a döntés a különböző, legalább egyszer kiszolgált részek arányán alapul, nem a
+leghosszabb megszakítás nélküli szakaszon. A beállított százalék erre a lefedettségre
+vonatkozik, ezért a végére ugrás önmagában nem elég; a második, alacsonyabb korlát csak
+akkor szigorít, ha nagyobbra állítod.
 
 ### Törlés az nCore közölt szabálya szerint
 
